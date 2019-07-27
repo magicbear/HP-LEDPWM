@@ -1,12 +1,12 @@
-# HP-LEDPWD
+# HP-LEDPWM
 Using ESP-01 To Control LED bright
 
 ## Diagram
-![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWD/master/sch.png)
+![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWM/master/sch.png)
 
 ## PCB
-![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWD/master/top.svg)
-![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWD/master/bottom.svg)
+![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWM/master/top.svg)
+![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWM/master/bottom.svg)
 
 ## Video Demo
 https://www.bilibili.com/video/av58690546/
