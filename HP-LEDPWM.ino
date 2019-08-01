@@ -1,8 +1,6 @@
 #include <ESP8266WiFi.h>
-#include <WiFiClient.h>
 #include <PubSubClient.h>
 
-#include <ESP8266HTTPClient.h>
 #include <ESP8266httpUpdate.h>
 #include <EEPROM.h>
 
@@ -11,20 +9,17 @@ extern "C"{
 }
 
 #define USING_CUSTOM_PWM
-//#define OUTPUT_BY_MOSFET
-
-// Period of PWM frequency -> default of SDK: 5000 -> * 200ns ^= 1 kHz
-#define PWM_PERIOD 320
+#define OUTPUT_BY_MOSFET
 
 // PWM channels
-#define PWM_CHANNELS 2
+#define PWM_CHANNELS 1
 
 #ifdef USING_CUSTOM_PWM
   // PWM setup (choice all pins that you use PWM)
   uint32 io_info[PWM_CHANNELS][3] = {
     // MUX, FUNC, PIN
     {PERIPHS_IO_MUX_U0RXD_U,  FUNC_GPIO3, 3}, // D3
-    {PERIPHS_IO_MUX_GPIO2_U,  FUNC_GPIO2, 2}, // D2
+//    {PERIPHS_IO_MUX_GPIO2_U,  FUNC_GPIO2, 2}, // D2
   };
   
   // PWM initial duty: all off
@@ -33,23 +28,28 @@ extern "C"{
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "1.6"
+#define VERSION "1.7"
 #endif
 
 // Warm / Single LED PWM Pin  (ESP-01  RXD0)
 #define PWM_PIN 3
 // Cold LED PWM Pin
-#define PWM_WPIN 2
+//#define PWM_WPIN 2
 const byte BUILTIN_LED1 = 1; //GPIO0
 
-int PWM_START = 0;
-int PWM_END = PWM_PERIOD;
+#ifdef USING_CUSTOM_PWM
+uint16_t ACCEPT_FACTOR[] = {
+  1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 625, 800, 1000, 1250, 1600, 2000, 2500, 3125, 4000, 5000, 6250, 8000, 10000, 12500, 15625, 20000, 25000, 31250, 40000, 50000, 62500
+};
+#endif
+// Period of PWM frequency -> default of SDK: 5000 -> * 200ns ^= 1 kHz
+uint16_t PWM_PERIOD = 320;
+uint16_t PWM_FREQUENCE = 25000;
+
+uint16_t PWM_START = 0;
+uint16_t PWM_END = PWM_PERIOD;
 //#define PWM_START 5
 //#define PWM_END 18
-
-#ifndef USING_CUSTOM_PWM
-uint16_t PWM_FREQUENCE = 25000;
-#endif
 
 char* ssid;
 char* password;
@@ -64,7 +64,7 @@ PubSubClient client(espClient);
 char last_state = -1;
 int set_state = 0;
 #ifdef PWM_WPIN
-int set_ct = 4000;
+uint16_t set_ct = 4000;
 #endif
 long last_rssi = -1;
 unsigned long last_send_rssi;
@@ -108,7 +108,13 @@ void updatePWMValue(int set_state)
 
   #endif
 #else
-    analogWrite(PWM_PIN, pwm_state);
+  Serial.printf("Set Power Power %d  => %d\n", set_state, pwm_state);
+  #ifdef USING_CUSTOM_PWM
+      pwm_set_duty(pwm_state, 0);
+      pwm_start(); // commit
+  #else
+      analogWrite(PWM_PIN, pwm_state);
+  #endif
 #endif
 }
 
@@ -124,21 +130,28 @@ void setup() {
       break;
     }
   }
-#ifndef USING_CUSTOM_PWM
   EEPROM.get(64, PWM_FREQUENCE);
   if (PWM_FREQUENCE == 0)
   {
       initEEPROM();
       EEPROM.get(64, PWM_FREQUENCE);
   }
-#endif
 
-  PWM_START = EEPROM.read(66);
-  PWM_END = EEPROM.read(67);
+  EEPROM.get(66, PWM_START);
+  EEPROM.get(68, PWM_END);
 #ifdef PWM_WPIN
-  EEPROM.get(68, set_ct);
+  EEPROM.get(70, set_ct);
 #endif
-#ifndef USING_CUSTOM_PWM
+#ifdef USING_CUSTOM_PWM
+  if (5000000 % PWM_FREQUENCE == 0)
+  {
+      PWM_PERIOD = 5000000 / PWM_FREQUENCE;
+  } else 
+  {
+      PWM_PERIOD = 320;
+      PWM_FREQUENCE = 5000000 / PWM_PERIOD;
+  }  
+#else
   analogWriteFreq(PWM_FREQUENCE);  // 10kHz
   analogWriteRange(PWM_PERIOD);
 #endif
@@ -184,7 +197,7 @@ void setup() {
   *p = '\0';
 
   EEPROM.get(192, port);
-    
+  Serial.println();
   Serial.printf("SSID = %s  PASSWORD = %s\n", ssid, password);
   if (strlen(ssid) == 0)
   {
@@ -278,11 +291,8 @@ void setup() {
     pwm_duty_init[channel] = 0;
   }
   
-  // Period
-  uint32_t period = PWM_PERIOD;
-
   // Initialize
-  pwm_init(period, pwm_duty_init, PWM_CHANNELS, io_info);
+  pwm_init(PWM_PERIOD, pwm_duty_init, PWM_CHANNELS, io_info);
 
   // Commit
   pwm_start();
@@ -291,6 +301,7 @@ void setup() {
   last_state_hold = 0;
   
   Serial.println();
+  Serial.printf("PWM Frequence = %d   Range = %d - %d\n", PWM_FREQUENCE, PWM_START, PWM_END);
   Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
   Serial.printf("Version: %s\n", VERSION);
   Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
@@ -330,9 +341,11 @@ void initEEPROM()
   // PWM FREQUENCE
   EEPROM.put(64, (int16_t)20000);
   // PWM START
-  EEPROM.write(66, 0);
+  EEPROM.put(66, (uint16_t)0);
   // PWM END
-  EEPROM.write(67, PWM_PERIOD);
+  EEPROM.put(68, (uint16_t)PWM_PERIOD);
+  // ColorTemperature
+  EEPROM.put(70, (uint16_t)4100);
   EEPROM.commit();
 }
 
@@ -401,25 +414,45 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     }
     EEPROM.commit();
     sendMeta();
-#ifndef USING_CUSTOM_PWM
   } else if (strcmp(topic, "set_pwm_freq") == 0)
   {
     char bufferByte = payload[length];
     payload[length] = 0;
     PWM_FREQUENCE = strtoul((char *)payload, NULL, 10);
+    
+#ifdef USING_CUSTOM_PWM
+    if (5000000 % PWM_FREQUENCE == 0)
+    {
+        PWM_PERIOD = 5000000 / PWM_FREQUENCE;
+    } else 
+    {
+        for (int i = sizeof(ACCEPT_FACTOR) / sizeof(uint16_t) - 1; i >= 0; i--)
+        {
+            if (ACCEPT_FACTOR[i] < PWM_FREQUENCE)
+            {
+                PWM_FREQUENCE = ACCEPT_FACTOR[i];
+                PWM_PERIOD = 5000000 / PWM_FREQUENCE;
+                break;
+            }
+        }
+    }    
+#endif
     payload[length] = bufferByte;
     EEPROM.put(64, PWM_FREQUENCE);
     EEPROM.commit();
+#ifdef USING_CUSTOM_PWM
+    ESP.reset();
+#else
     analogWriteFreq(PWM_FREQUENCE);  // 10kHz
+#endif
     updatePWMValue(set_state);
     sendMeta();
-#endif
   } else if (strcmp(topic, "set_pwm_start") == 0)
   {
     char bufferByte = payload[length];
     payload[length] = 0;
     PWM_START = atoi((char *)payload);
-    EEPROM.write(66, PWM_START);
+    EEPROM.put(66, PWM_START);
     payload[length] = bufferByte;
     EEPROM.commit();
     updatePWMValue(set_state);
@@ -429,7 +462,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     char bufferByte = payload[length];
     payload[length] = 0;
     PWM_END = atoi((char *)payload);
-    EEPROM.write(67, PWM_END);
+    EEPROM.put(68, PWM_END);
     payload[length] = bufferByte;
     EEPROM.commit();
     updatePWMValue(set_state);
@@ -483,7 +516,6 @@ void reconnect() {//等待，直到连接上服务器
   }
 }
 
-char buffer[256];
 int buflen = 0;
 void loop() {
    hasPacket = false;
@@ -493,7 +525,7 @@ void loop() {
    if (last_state_hold != 0 && millis() - last_state_hold >= 3000 && set_state != -1)
    {
 #ifdef PWM_WPIN
-      EEPROM.put(68, set_ct);
+      EEPROM.put(70, set_ct);
 #endif
       EEPROM.write(15, set_state);
       EEPROM.commit();
