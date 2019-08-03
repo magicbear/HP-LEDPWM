@@ -8,18 +8,25 @@ extern "C"{
   #include "pwm.h"
 }
 
+// CONFIG: USING INTERRUPT PWM instand for SDK PWM
 #define USING_CUSTOM_PWM
+// CONFIG: REVERSE THE OUTPUT FOR MOSFET+BJT Driver
 #define OUTPUT_BY_MOSFET
-
-// PWM channels
-#define PWM_CHANNELS 1
+// CONFIG: SMOOTH PWM INTERVAL IN mS
+#define SMOOTH_INTERVAL 200
+// CONFIG: TOTAL PWM channels (When using DUAL ColorTemperature strip will set to 2)
+#define PWM_CHANNELS 2
+// CONFIG: Warm / Single LED PWM Pin  (ESP-01  RXD0)
+#define PWM_PIN 3
+// CONFIG: Cold LED PWM Pin
+#define PWM_WPIN 2
 
 #ifdef USING_CUSTOM_PWM
   // PWM setup (choice all pins that you use PWM)
   uint32 io_info[PWM_CHANNELS][3] = {
     // MUX, FUNC, PIN
     {PERIPHS_IO_MUX_U0RXD_U,  FUNC_GPIO3, 3}, // D3
-//    {PERIPHS_IO_MUX_GPIO2_U,  FUNC_GPIO2, 2}, // D2
+    {PERIPHS_IO_MUX_GPIO2_U,  FUNC_GPIO2, 2} // D2
   };
   
   // PWM initial duty: all off
@@ -31,10 +38,6 @@ extern "C"{
 #define VERSION "1.7"
 #endif
 
-// Warm / Single LED PWM Pin  (ESP-01  RXD0)
-#define PWM_PIN 3
-// Cold LED PWM Pin
-//#define PWM_WPIN 2
 const byte BUILTIN_LED1 = 1; //GPIO0
 
 #ifdef USING_CUSTOM_PWM
@@ -43,13 +46,11 @@ uint16_t ACCEPT_FACTOR[] = {
 };
 #endif
 // Period of PWM frequency -> default of SDK: 5000 -> * 200ns ^= 1 kHz
-uint16_t PWM_PERIOD = 320;
-uint16_t PWM_FREQUENCE = 25000;
+uint16_t PWM_PERIOD = 250;
+uint16_t PWM_FREQUENCE = 20000;
 
 uint16_t PWM_START = 0;
 uint16_t PWM_END = PWM_PERIOD;
-//#define PWM_START 5
-//#define PWM_END 18
 
 char* ssid;
 char* password;
@@ -61,7 +62,9 @@ char msg_buf[64];
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+bool inSmooth = false;
 char last_state = -1;
+int last_set_state = 0;
 int set_state = 0;
 #ifdef PWM_WPIN
 uint16_t set_ct = 4000;
@@ -74,17 +77,13 @@ bool hasPacket = false;
 
 void updatePWMValue(int set_state)
 {
-#ifdef OUTPUT_BY_MOSFET
-    int pwm_state = map(set_state, 0, 100, PWM_PERIOD - PWM_START, PWM_PERIOD - PWM_END);
-#else
     int pwm_state = map(set_state, 0, 100, PWM_START, PWM_END);
-#endif
     if (pwm_state == PWM_PERIOD-PWM_START) pwm_state = PWM_PERIOD;
     if (pwm_state == PWM_PERIOD-PWM_END) pwm_state = 0;
 #ifdef PWM_WPIN
     float set_power = 0.5 + (set_ct - 4100) / 3000.;
 
-    float warm_power = (1-set_power);
+    float warm_power = 1-set_power;
     float cold_power = set_power;
 
     if (set_power > 0 && set_power < 0.5)
@@ -97,7 +96,21 @@ void updatePWMValue(int set_state)
         cold_power = 1;
     }
 
-  Serial.printf("Set Power Power %d  CT: %d WARM: %d  COLD: %d\n", set_state, set_ct, (int)(pwm_state * warm_power), (int)(pwm_state * cold_power));
+  Serial.printf("Set Power Power %d PWM = %d  CT: %d WARM: %d%% %d  COLD: %d%% %d\n", set_state, pwm_state, set_ct, (int)(warm_power * 100), (int)(pwm_state * warm_power), (int)(cold_power * 100), (int)(pwm_state * cold_power));
+
+  
+#ifdef OUTPUT_BY_MOSFET
+
+  #ifdef USING_CUSTOM_PWM
+      pwm_set_duty(PWM_PERIOD - pwm_state * warm_power, 0);
+      pwm_set_duty(PWM_PERIOD - pwm_state * cold_power, 1);
+      pwm_start(); // commit
+  #else
+      analogWrite(PWM_PIN, PWM_PERIOD - pwm_state * warm_power);
+      analogWrite(PWM_WPIN, PWM_PERIOD - pwm_state * cold_power);
+  #endif
+#else
+
   #ifdef USING_CUSTOM_PWM
       pwm_set_duty(pwm_state * warm_power, 0);
       pwm_set_duty(pwm_state * cold_power, 1);
@@ -105,9 +118,15 @@ void updatePWMValue(int set_state)
   #else
       analogWrite(PWM_PIN, pwm_state * warm_power);
       analogWrite(PWM_WPIN, pwm_state * cold_power);
-
   #endif
+#endif
+
 #else
+
+#ifdef OUTPUT_BY_MOSFET
+  pwm_state = PWM_PERIOD - pwm_state;
+#endif
+
   Serial.printf("Set Power Power %d  => %d\n", set_state, pwm_state);
   #ifdef USING_CUSTOM_PWM
       pwm_set_duty(pwm_state, 0);
@@ -366,6 +385,13 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   hasPacket = true;
   if (strcmp(topic, "set_bright") == 0)
   {
+    if (!inSmooth)
+    {
+        last_set_state = set_state;
+        inSmooth = true;
+    } else {
+        last_set_state = last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL;
+    }
     set_state = atoi((char *)payload);
     updatePWMValue(set_state);
     last_state_hold = millis();
@@ -439,6 +465,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
 #endif
     payload[length] = bufferByte;
     EEPROM.put(64, PWM_FREQUENCE);
+    EEPROM.put(68, PWM_PERIOD);
     EEPROM.commit();
 #ifdef USING_CUSTOM_PWM
     ESP.reset();
@@ -487,27 +514,22 @@ void sendMeta()
   // max length = 64 - 21
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"");
     p = loadEEPName(p);
-    p = p + sprintf(p, "\","
-#ifndef USING_CUSTOM_PWM
-    "\"pwm_freq\":%d,"
-#endif
-    "\"pwm_start\":%d,\"pwm_end\":%d}", 
-#ifndef USING_CUSTOM_PWM
-PWM_FREQUENCE, 
-#endif
-    PWM_START, PWM_END);
+    p = p + sprintf(p, "\",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d}", PWM_FREQUENCE, PWM_START, PWM_END);
     client.publish("dev", msg_buf);
 }
 
 void reconnect() {//等待，直到连接上服务器
+  if (!client.connected()){
+      Serial.print("Connecting to MQTT server");    
+  }
   while (!client.connected()) {//如果没有连接上
     if (client.connect(mqtt_cls)) {//接入时的用户名，尽量取一个很不常用的用户名
-      Serial.println("Connect to MQTT server Success!");
+      Serial.println(" success");//连接失
       sendMeta();
       last_rssi = -1;
       last_state = -1;
     } else {
-      Serial.print("failed, rc=");//连接失败
+      Serial.print(" failed, rc=");//连接失败
       Serial.print(client.state());//重新连接
       Serial.println(" try again in 5 seconds");//延时5秒后重新连接
       delay(5000);
@@ -522,7 +544,16 @@ void loop() {
    reconnect();//确保连上服务器，否则一直等待。
    client.loop();//MUC接收数据的主循环函数。
    long rssi = WiFi.RSSI();
-   if (last_state_hold != 0 && millis() - last_state_hold >= 3000 && set_state != -1)
+   if (inSmooth && last_state_hold != 0 && millis() - last_state_hold <= SMOOTH_INTERVAL && set_state != -1)
+   {      
+      updatePWMValue((int)(last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
+   }
+   if (inSmooth && millis() - last_state_hold > SMOOTH_INTERVAL && set_state != -1)
+   {
+      updatePWMValue(set_state);
+      inSmooth = false;
+   }
+   if (last_state_hold != 0 && millis() - last_state_hold >= 500 && set_state != -1)
    {
 #ifdef PWM_WPIN
       EEPROM.put(70, set_ct);
@@ -546,6 +577,6 @@ void loop() {
 
    if (!hasPacket)
    {
-      delay(100);
+      delay(20);
    }
 }
