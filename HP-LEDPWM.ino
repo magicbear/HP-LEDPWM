@@ -4,12 +4,14 @@
 #include <ESP8266httpUpdate.h>
 #include <EEPROM.h>
 
+#include "config.h"
+
 extern "C"{
   #include "pwm.h"
 }
 
 // CONFIG: USING INTERRUPT PWM instand for SDK PWM
-#define USING_CUSTOM_PWM
+//#define USING_CUSTOM_PWM
 // CONFIG: REVERSE THE OUTPUT FOR MOSFET+BJT Driver
 #define OUTPUT_BY_MOSFET
 // CONFIG: SMOOTH PWM INTERVAL IN mS
@@ -19,7 +21,7 @@ extern "C"{
 // CONFIG: Warm / Single LED PWM Pin  (ESP-01  RXD0)
 #define PWM_PIN 3
 // CONFIG: Cold LED PWM Pin
-#define PWM_WPIN 2
+//#define PWM_WPIN 2
 
 #ifdef USING_CUSTOM_PWM
   // PWM setup (choice all pins that you use PWM)
@@ -35,7 +37,7 @@ extern "C"{
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "1.7"
+#define VERSION "1.91"
 #endif
 
 const byte BUILTIN_LED1 = 1; //GPIO0
@@ -52,12 +54,28 @@ uint16_t PWM_FREQUENCE = 20000;
 uint16_t PWM_START = 0;
 uint16_t PWM_END = PWM_PERIOD;
 
+uint16_t set_ct = 4000;
+uint8_t  set_state = 0;
+uint16_t port = 1883;//服务器端口号
+
 char* ssid;
 char* password;
 char* mqtt_server[16];//服务器的地址 
-int port = 1883;//服务器端口号
 char mqtt_cls[sizeof(MQTT_CLASS) + 13];
-char msg_buf[64];
+char msg_buf[128];
+
+const hp_cfg_t def_cfg[] = {
+  {15, sizeof(uint8_t), (uint8_t)10,      &set_state},       // BRIGHT
+  {16, sizeof(uint8_t), (uint8_t)0, NULL},                   // NAME LENGTH
+  {64, sizeof(uint16_t), (uint16_t)20000, &PWM_FREQUENCE},   // UINT16: PWM FREQUENCE
+  {66, sizeof(uint16_t), (uint16_t)0,     &PWM_START},       // UINT16: PWM START
+  {68, sizeof(uint16_t), (uint16_t)250,   &PWM_END},         // UINT16: PWM END
+  {70, sizeof(uint16_t), (uint16_t)4100,  &set_ct},          // UINT16: COLOR TEMPERATURE
+  {96, sizeof(uint8_t), (uint8_t)0, NULL},                   // STRING: SSID
+  {128, sizeof(uint8_t), (uint8_t)0, NULL},                  // STRING: WIFI PASSWORD 
+  {160, sizeof(mqtt_server), (uint8_t)0, mqtt_server},       // STRING: MQTT SERVER
+  {192, sizeof(uint16_t), (uint16_t)1883, &port},            // UINT16: PORT
+};
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -65,10 +83,6 @@ PubSubClient client(espClient);
 bool inSmooth = false;
 char last_state = -1;
 int last_set_state = 0;
-int set_state = 0;
-#ifdef PWM_WPIN
-uint16_t set_ct = 4000;
-#endif
 long last_rssi = -1;
 unsigned long last_send_rssi;
 unsigned long last_state_hold;
@@ -141,26 +155,32 @@ void setup() {
   pinMode(BUILTIN_LED1, OUTPUT);
   digitalWrite(BUILTIN_LED1, LOW);
   EEPROM.begin(256);
+  
+  pinMode(PWM_PIN, OUTPUT);
+#ifdef PWM_WPIN
+  pinMode(PWM_WPIN, OUTPUT);
+#endif
+  
+  Serial.begin(115200);
+  byte mac[6];
+  WiFi.macAddress(mac);
+  sprintf(mqtt_cls, MQTT_CLASS"-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
   for (int i = 0; i < sizeof(MQTT_CLASS) - 1; i++)
   {
     if (EEPROM.read(i) != mqtt_cls[i])
     {
-      initEEPROM();
+      CFG_INIT();
       break;
     }
   }
-  EEPROM.get(64, PWM_FREQUENCE);
+  CFG_LOAD();
   if (PWM_FREQUENCE == 0)
   {
-      initEEPROM();
-      EEPROM.get(64, PWM_FREQUENCE);
+      CFG_INIT();
+      CFG_LOAD();
   }
 
-  EEPROM.get(66, PWM_START);
-  EEPROM.get(68, PWM_END);
-#ifdef PWM_WPIN
-  EEPROM.get(70, set_ct);
-#endif
 #ifdef USING_CUSTOM_PWM
   if (5000000 % PWM_FREQUENCE == 0)
   {
@@ -175,47 +195,28 @@ void setup() {
   analogWriteRange(PWM_PERIOD);
 #endif
 
-  pinMode(PWM_PIN, OUTPUT);
-#ifdef PWM_WPIN
-  pinMode(PWM_WPIN, OUTPUT);
-#endif
-  
-  Serial.begin(115200);
-  byte mac[6];
-  WiFi.macAddress(mac);
-  sprintf(mqtt_cls, MQTT_CLASS"-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-
   WiFi.mode(WIFI_STA);
 //  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
 
-  int iOffset = 96;
-  char *p = msg_buf;
+  char *p;
   char chEEP;
-  while (chEEP = EEPROM.read(iOffset++))
+  int iOffset;
+  int rc = CFG_READ_STRING(96, msg_buf, sizeof(msg_buf));
+  if (rc == -1)
   {
-      *p++ = chEEP;
+      CFG_INIT();
+      ESP.reset();
   }
-  *p++ = '\0';
-
-  ssid = msg_buf;
-  password = p;
-
-  iOffset = 128;
-  while (chEEP = EEPROM.read(iOffset++))
+  ssid = msg_buf;  
+  password = msg_buf + rc + 1;
+  
+  rc = CFG_READ_STRING(128, msg_buf + rc + 1, sizeof(msg_buf) - rc - 1);
+  if (rc == -1)
   {
-      *p++ = chEEP;
+      CFG_INIT();
+      ESP.reset();
   }
-  *p++ = '\0';
-
-  p = (char *)mqtt_server;
-  iOffset = 160;
-  while (chEEP = EEPROM.read(iOffset++))
-  {
-      *p++ = chEEP;
-  }
-  *p = '\0';
-
-  EEPROM.get(192, port);
+  
   Serial.println();
   Serial.printf("SSID = %s  PASSWORD = %s\n", ssid, password);
   if (strlen(ssid) == 0)
@@ -282,27 +283,13 @@ void setup() {
               }
           }
       }
-      iOffset = 96;
-      p = ssid;
-      while (*p != '\0') EEPROM.write(iOffset++, *p++);
-      EEPROM.write(iOffset, 0);
-
-      p = password;
-      iOffset = 128;
-      while (*p != '\0') EEPROM.write(iOffset++, *p++);
-      EEPROM.write(iOffset, 0);
-
-      p = (char *)mqtt_server;
-      iOffset = 160;
-      while (*p != '\0') EEPROM.write(iOffset++, *p++);
-      EEPROM.write(iOffset, 0);
-
-      EEPROM.put(192, port);
-      EEPROM.commit();
+      Serial.println();
+      CFG_WRITE_STRING(96, ssid, sizeof(msg_buf));
+      CFG_WRITE_STRING(128, password, sizeof(msg_buf) - (password - msg_buf));
+      CFG_WRITE_STRING(160, (char *)mqtt_server, sizeof(mqtt_server));
+      CFG_SAVE();
   }
   WiFi.begin(ssid, password);
-
-  set_state = EEPROM.read(15);
 
 #ifdef USING_CUSTOM_PWM
   // Initial duty -> all off
@@ -324,10 +311,15 @@ void setup() {
   Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
   Serial.printf("Version: %s\n", VERSION);
   Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
-  Serial.print("Connecting");
+  Serial.print("Connecting to ");
+  Serial.printf("%s:%d ", mqtt_server, port);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
+//    while (Serial.available())
+//    {
+//        if (Serial.read() == 'r') { CFG_INIT(); ESP.reset(); }
+//    }
   }
   
   Serial.println();
@@ -339,43 +331,6 @@ void setup() {
   WiFi.setSleepMode(WIFI_LIGHT_SLEEP, 1000);
   client.setServer((const char *)mqtt_server, port);//端口号
   client.setCallback(callback); //用于接收服务器接收的数据
-}
-
-
-void initEEPROM()
-{
-  for (int i = 0; i < sizeof(MQTT_CLASS) - 1; i++)
-  {
-    EEPROM.write(i, mqtt_cls[i]);
-  }
-  EEPROM.write(15, 10);
-  EEPROM.write(16, 0);
-
-  EEPROM.write(96, 0);  // SSID
-  EEPROM.write(128, 0);  // PASSWORD
-  EEPROM.write(160, 0);  // MQTT Server
-  port = 1883;
-  EEPROM.put(192, port);  // MQTT Server
-  
-  // PWM FREQUENCE
-  EEPROM.put(64, (int16_t)20000);
-  // PWM START
-  EEPROM.put(66, (uint16_t)0);
-  // PWM END
-  EEPROM.put(68, (uint16_t)PWM_PERIOD);
-  // ColorTemperature
-  EEPROM.put(70, (uint16_t)4100);
-  EEPROM.commit();
-}
-
-char *loadEEPName(char *buffer)
-{
-    uint8_t len = EEPROM.read(16);
-    for (uint8_t i = 0; i < len; i++)
-    {
-        buffer[i] = EEPROM.read(i + 17);
-    }
-    return buffer + len;
 }
 
 
@@ -429,16 +384,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     }
   } else if (strcmp(topic, "setName") == 0)
   {
-    if (length > 64 - 21 - EEPROM.read(64))
-    {
-      length = 64 - 21 - EEPROM.read(64);
-    }
-    EEPROM.write(16, length);
-    for (int i = 0; i < length;i++)
-    {
-      EEPROM.write(17+i, payload[i]);
-    }
-    EEPROM.commit();
+    Serial.printf("Write %d bytes\n", CFG_WRITE_STRING(16, (char *)payload, length));
     sendMeta();
   } else if (strcmp(topic, "set_pwm_freq") == 0)
   {
@@ -464,9 +410,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     }    
 #endif
     payload[length] = bufferByte;
-    EEPROM.put(64, PWM_FREQUENCE);
-    EEPROM.put(68, PWM_PERIOD);
-    EEPROM.commit();
+    CFG_SAVE();
 #ifdef USING_CUSTOM_PWM
     ESP.reset();
 #else
@@ -479,9 +423,8 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     char bufferByte = payload[length];
     payload[length] = 0;
     PWM_START = atoi((char *)payload);
-    EEPROM.put(66, PWM_START);
     payload[length] = bufferByte;
-    EEPROM.commit();
+    CFG_SAVE();
     updatePWMValue(set_state);
     sendMeta();
   } else if (strcmp(topic, "set_pwm_end") == 0)
@@ -489,9 +432,8 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     char bufferByte = payload[length];
     payload[length] = 0;
     PWM_END = atoi((char *)payload);
-    EEPROM.put(68, PWM_END);
     payload[length] = bufferByte;
-    EEPROM.commit();
+    CFG_SAVE();
     updatePWMValue(set_state);
     sendMeta();
 
@@ -513,7 +455,7 @@ void sendMeta()
 {
   // max length = 64 - 21
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"");
-    p = loadEEPName(p);
+    p += CFG_READ_STRING(16, p, 32);
     p = p + sprintf(p, "\",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d}", PWM_FREQUENCE, PWM_START, PWM_END);
     client.publish("dev", msg_buf);
 }
@@ -553,13 +495,9 @@ void loop() {
       updatePWMValue(set_state);
       inSmooth = false;
    }
-   if (last_state_hold != 0 && millis() - last_state_hold >= 500 && set_state != -1)
+   if (last_state_hold != 0 && millis() - last_state_hold >= 2000 && set_state != -1)
    {
-#ifdef PWM_WPIN
-      EEPROM.put(70, set_ct);
-#endif
-      EEPROM.write(15, set_state);
-      EEPROM.commit();
+      CFG_SAVE();
       last_state_hold = 0;
    }
    if (last_state != set_state || (abs(rssi - last_rssi) >= 3 && millis() - last_send_rssi >= 5000))
@@ -568,9 +506,9 @@ void loop() {
       last_state = set_state;
       last_rssi = rssi;
 #ifdef PWM_WPIN
-      sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\",\"ota\":\"unset\"}", set_state, set_ct, rssi, VERSION);
+      sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\"}", set_state, set_ct, rssi, VERSION);
 #else
-      sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"ota\":\"unset\"}", set_state, rssi, VERSION);
+      sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\"}", set_state, rssi, VERSION);
 #endif
       client.publish("status", msg_buf);
    }
