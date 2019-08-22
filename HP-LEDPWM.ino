@@ -2,15 +2,13 @@
 #include <PubSubClient.h>
 
 #include <ESP8266httpUpdate.h>
-#include <EEPROM.h>
-
 #include "config.h"
 
 extern "C"{
   #include "pwm.h"
 }
 
-// CONFIG: USING INTERRUPT PWM instand for SDK PWM
+// CONFIG: USING INTERRUPT PWM instand for SDK PWM - For OLD VERSION of SDK
 //#define USING_CUSTOM_PWM
 // CONFIG: REVERSE THE OUTPUT FOR MOSFET+BJT Driver
 #define OUTPUT_BY_MOSFET
@@ -37,10 +35,8 @@ extern "C"{
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "1.91"
+#define VERSION "1.97"
 #endif
-
-const byte BUILTIN_LED1 = 1; //GPIO0
 
 #ifdef USING_CUSTOM_PWM
 uint16_t ACCEPT_FACTOR[] = {
@@ -48,7 +44,7 @@ uint16_t ACCEPT_FACTOR[] = {
 };
 #endif
 // Period of PWM frequency -> default of SDK: 5000 -> * 200ns ^= 1 kHz
-uint16_t PWM_PERIOD = 250;
+uint16_t PWM_PERIOD = 200;
 uint16_t PWM_FREQUENCE = 20000;
 
 uint16_t PWM_START = 0;
@@ -58,6 +54,8 @@ uint16_t set_ct = 4000;
 uint8_t  set_state = 0;
 uint16_t port = 1883;//服务器端口号
 
+int retry_failed_count = 0;
+
 char* ssid;
 char* password;
 char* mqtt_server[16];//服务器的地址 
@@ -65,11 +63,11 @@ char mqtt_cls[sizeof(MQTT_CLASS) + 13];
 char msg_buf[128];
 
 const hp_cfg_t def_cfg[] = {
-  {15, sizeof(uint8_t), (uint8_t)10,      &set_state},       // BRIGHT
-  {16, sizeof(uint8_t), (uint8_t)0, NULL},                   // NAME LENGTH
+  {31, sizeof(uint8_t), (uint8_t)10,      &set_state},       // BRIGHT
+  {32, sizeof(uint8_t), (uint8_t)0, NULL},                   // NAME LENGTH
   {64, sizeof(uint16_t), (uint16_t)20000, &PWM_FREQUENCE},   // UINT16: PWM FREQUENCE
   {66, sizeof(uint16_t), (uint16_t)0,     &PWM_START},       // UINT16: PWM START
-  {68, sizeof(uint16_t), (uint16_t)250,   &PWM_END},         // UINT16: PWM END
+  {68, sizeof(uint16_t), (uint16_t)200,   &PWM_END},         // UINT16: PWM END
   {70, sizeof(uint16_t), (uint16_t)4100,  &set_ct},          // UINT16: COLOR TEMPERATURE
   {96, sizeof(uint8_t), (uint8_t)0, NULL},                   // STRING: SSID
   {128, sizeof(uint8_t), (uint8_t)0, NULL},                  // STRING: WIFI PASSWORD 
@@ -85,6 +83,7 @@ char last_state = -1;
 int last_set_state = 0;
 long last_rssi = -1;
 unsigned long last_send_rssi;
+unsigned long last_send_meta = 0;
 unsigned long last_state_hold;
 bool otaMode = true;                             //OTA mode flag
 bool hasPacket = false;
@@ -152,28 +151,22 @@ void updatePWMValue(int set_state)
 }
 
 void setup() {
-  pinMode(BUILTIN_LED1, OUTPUT);
-  digitalWrite(BUILTIN_LED1, LOW);
-  EEPROM.begin(256);
+  pinMode(BUILTIN_LED, OUTPUT);
+  digitalWrite(BUILTIN_LED, LOW);
   
   pinMode(PWM_PIN, OUTPUT);
 #ifdef PWM_WPIN
   pinMode(PWM_WPIN, OUTPUT);
 #endif
-  
+
+  WiFi.persistent( false );
   Serial.begin(115200);
   byte mac[6];
   WiFi.macAddress(mac);
   sprintf(mqtt_cls, MQTT_CLASS"-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-  for (int i = 0; i < sizeof(MQTT_CLASS) - 1; i++)
-  {
-    if (EEPROM.read(i) != mqtt_cls[i])
-    {
-      CFG_INIT();
-      break;
-    }
-  }
+  cfg_begin();
+  CFG_CHECK();
   CFG_LOAD();
   if (PWM_FREQUENCE == 0)
   {
@@ -217,7 +210,8 @@ void setup() {
       ESP.reset();
   }
   
-  Serial.println();
+  Serial.printf("\n");
+  Serial.printf("CONFIG SRC: %s\n", cfg_spiffs() ? "SPIFFS" : "EEPROM");
   Serial.printf("SSID = %s  PASSWORD = %s\n", ssid, password);
   if (strlen(ssid) == 0)
   {
@@ -233,7 +227,7 @@ void setup() {
               *p++ = chEEP == '\n' ? '\0' : chEEP;
           }
       }
-      Serial.println();
+      Serial.printf("\n");
       Serial.print("Please input Password: ");
       password = p;
       chEEP = '\0';
@@ -245,7 +239,7 @@ void setup() {
               *p++ = chEEP == '\n' ? '\0' : chEEP;
           }
       }
-      Serial.println();
+      Serial.printf("\n");
       Serial.print("Please input MQTT Server & Port: ");
       p = (char *)mqtt_server;
       chEEP = '\0';
@@ -269,7 +263,7 @@ void setup() {
               }
           }
       }
-      Serial.println();
+      Serial.printf("\n");
       Serial.printf("Input SSID = %s  PASSWORD = %s  MQTT Server: %s:%d\n", ssid, password, mqtt_server, port);
       Serial.print("Confirm? [y/n]");
       while (chEEP != 'y')
@@ -283,7 +277,7 @@ void setup() {
               }
           }
       }
-      Serial.println();
+      Serial.printf("\n");
       CFG_WRITE_STRING(96, ssid, sizeof(msg_buf));
       CFG_WRITE_STRING(128, password, sizeof(msg_buf) - (password - msg_buf));
       CFG_WRITE_STRING(160, (char *)mqtt_server, sizeof(mqtt_server));
@@ -306,13 +300,13 @@ void setup() {
   updatePWMValue(set_state);
   last_state_hold = 0;
   
-  Serial.println();
+  Serial.printf("\n");
   Serial.printf("PWM Frequence = %d   Range = %d - %d\n", PWM_FREQUENCE, PWM_START, PWM_END);
   Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
   Serial.printf("Version: %s\n", VERSION);
   Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
-  Serial.print("Connecting to ");
-  Serial.printf("%s:%d ", mqtt_server, port);
+  Serial.printf("Reset Reason: %s\n", ESP.getResetReason().c_str());
+  Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -322,15 +316,17 @@ void setup() {
 //    }
   }
   
-  Serial.println();
+  Serial.printf("\n");
   
-  Serial.print("Connected to wifi. My address:");
   IPAddress myAddress = WiFi.localIP();
-  Serial.println(myAddress);  
+  Serial.printf("Connected to wifi. My address: ");
+  Serial.print(myAddress);
   
-  WiFi.setSleepMode(WIFI_LIGHT_SLEEP, 1000);
+  Serial.printf("\nConnecting to %s:%d ", mqtt_server, port);
+//  WiFi.setSleepMode(WIFI_LIGHT_SLEEP, 1000);
   client.setServer((const char *)mqtt_server, port);//端口号
   client.setCallback(callback); //用于接收服务器接收的数据
+  Serial.printf("Success\n");
 }
 
 
@@ -348,7 +344,17 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
         last_set_state = last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL;
     }
     set_state = atoi((char *)payload);
-    updatePWMValue(set_state);
+    
+    if (last_set_state == set_state)
+    {
+        inSmooth = false;
+        Serial.print("Ignore: ");
+        updatePWMValue(set_state);
+    } else if (!inSmooth)
+    {
+        Serial.print("DIRECT: ");
+        updatePWMValue(set_state);
+    }
     last_state_hold = millis();
     last_state = -1;
   } else if (strcmp(topic, "ota") == 0)
@@ -357,8 +363,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
 
     char bufferByte = payload[length];
     payload[length] = 0;
-    Serial.print("Start OTA from URL: ");
-    Serial.println((char *)payload);
+    Serial.printf("Start OTA from URL: %s\n", (char *)payload);
     t_httpUpdate_return ret = ESPhttpUpdate.update(ota_client, (char *)payload);
 
     payload[length] = bufferByte;
@@ -384,7 +389,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     }
   } else if (strcmp(topic, "setName") == 0)
   {
-    Serial.printf("Write %d bytes\n", CFG_WRITE_STRING(16, (char *)payload, length));
+    Serial.printf("Write %d bytes\n", CFG_WRITE_STRING(32, (char *)payload, length));
     sendMeta();
   } else if (strcmp(topic, "set_pwm_freq") == 0)
   {
@@ -447,35 +452,52 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
 #endif
   } else if (strcmp(topic, "reset") == 0)
   {
+    CFG_INIT();
+  } else if (strcmp(topic, "reboot") == 0)
+  {
     ESP.reset();
   }
 }
 
 void sendMeta()
 {
+    last_send_meta = millis();
   // max length = 64 - 21
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"");
-    p += CFG_READ_STRING(16, p, 32);
-    p = p + sprintf(p, "\",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d}", PWM_FREQUENCE, PWM_START, PWM_END);
+    p += CFG_READ_STRING(32, p, 32);
+    p = p + sprintf(p, "\",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"boot\":%ld,\"rst\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, millis(), ESP.getResetInfoPtr()->reason);
     client.publish("dev", msg_buf);
 }
 
 void reconnect() {//等待，直到连接上服务器
+  if (WiFi.status() != WL_CONNECTED) {
+      Serial.printf("WiFi: DISCONNECTED, RESET SYSTEM\n");
+      ESP.reset();
+  }
   if (!client.connected()){
-      Serial.print("Connecting to MQTT server");    
+      Serial.print("Connecting to MQTT server...");
   }
   while (!client.connected()) {//如果没有连接上
     if (client.connect(mqtt_cls)) {//接入时的用户名，尽量取一个很不常用的用户名
-      Serial.println(" success");//连接失
+      retry_failed_count = 0;
+      Serial.printf(" success, login by: %s\n",mqtt_cls);//连接失
       sendMeta();
       last_rssi = -1;
       last_state = -1;
     } else {
+      retry_failed_count++;
       Serial.print(" failed, rc=");//连接失败
       Serial.print(client.state());//重新连接
-      Serial.println(" try again in 5 seconds");//延时5秒后重新连接
-      delay(5000);
-      ESP.reset();
+      Serial.printf(" try again in 1 seconds\n");//延时5秒后重新连接
+      delay(1000);
+      if (retry_failed_count >= 10)
+      {
+          Serial.printf("MQTT: Reconnect Too many times, RESET SYSTEM\n");
+          ESP.reset();
+      } else 
+      {
+        Serial.print("Connecting to MQTT server");
+      }      
     }
   }
 }
@@ -487,11 +509,13 @@ void loop() {
    client.loop();//MUC接收数据的主循环函数。
    long rssi = WiFi.RSSI();
    if (inSmooth && last_state_hold != 0 && millis() - last_state_hold <= SMOOTH_INTERVAL && set_state != -1)
-   {      
+   {
+      Serial.print("Smooth: ");
       updatePWMValue((int)(last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
    }
    if (inSmooth && millis() - last_state_hold > SMOOTH_INTERVAL && set_state != -1)
    {
+      Serial.print("Final: ");
       updatePWMValue(set_state);
       inSmooth = false;
    }
@@ -511,6 +535,12 @@ void loop() {
       sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\"}", set_state, rssi, VERSION);
 #endif
       client.publish("status", msg_buf);
+   }
+
+   if (millis() - last_send_meta >= 60000)
+   {
+      Serial.printf("PING %ld  WiFI: %d\n", millis(), WiFi.status());
+      sendMeta();
    }
 
    if (!hasPacket)
