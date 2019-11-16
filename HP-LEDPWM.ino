@@ -6,6 +6,9 @@
 #else
   #include <ESP8266WiFi.h>
   #include <ESP8266httpUpdate.h>
+extern "C"{
+    #include "pwm.h"
+}
 #endif
 #include <PubSubClient.h>
 #include <Ticker.h>
@@ -24,12 +27,18 @@ int16_t  PWM_SCR_DELAY = 0;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.11"
+#define _VERSION "2.12"
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
 #else
 #define VERSION _VERSION
+  #define PWM_CHANNELS 2
+  // PWM setup (choice all pins that you use PWM)
+  uint32 io_info[PWM_CHANNELS][3];
+  
+  // PWM initial duty: all off
+  uint32 pwm_duty_init[PWM_CHANNELS];  
 #endif
 
 #endif
@@ -103,6 +112,36 @@ bool hasPacket = false;
 uint32_t boot_time;
 bool bootCountReset = false;
 
+#ifdef ARDUINO_ARCH_ESP8266
+uint32_t PinToGPIOMuxFunc(uint8_t pin)
+{
+    // FUNC_GPIO0:  0, 2, 4, 5
+    // FUNC_GPIO3: 1, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+    if (pin == 0 || pin == 2 || pin == 4 || pin == 5) return FUNC_GPIO0;
+    return FUNC_GPIO3;
+}
+
+uint32_t PinToGPIOMux(uint8_t pin)
+{
+    if (pin == 0) return PERIPHS_IO_MUX_GPIO0_U;
+    if (pin == 1) return PERIPHS_IO_MUX_U0TXD_U;
+    if (pin == 2) return PERIPHS_IO_MUX_GPIO2_U;
+    if (pin == 3) return PERIPHS_IO_MUX_U0RXD_U;
+    if (pin == 4) return PERIPHS_IO_MUX_GPIO4_U;
+    if (pin == 5) return PERIPHS_IO_MUX_GPIO5_U;
+    if (pin == 6) return PERIPHS_IO_MUX_SD_CLK_U;
+    if (pin == 7) return PERIPHS_IO_MUX_SD_DATA0_U;
+    if (pin == 8) return PERIPHS_IO_MUX_SD_DATA1_U;
+    if (pin == 9) return PERIPHS_IO_MUX_SD_DATA2_U;
+    if (pin == 10) return PERIPHS_IO_MUX_SD_DATA3_U;
+    if (pin == 11) return PERIPHS_IO_MUX_SD_CMD_U;
+    if (pin == 12) return PERIPHS_IO_MUX_MTDI_U;
+    if (pin == 13) return PERIPHS_IO_MUX_MTCK_U;
+    if (pin == 14) return PERIPHS_IO_MUX_MTMS_U;
+    if (pin == 15) return PERIPHS_IO_MUX_MTDO_U;
+}
+#endif
+
 void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
 {
 #ifdef ARDUINO_ARCH_ESP32
@@ -119,9 +158,38 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
         ledcSetup(1, freq, bits);
     }
 #else
-    analogWriteFreq(freq);  // 10kHz
-    analogWriteRange(period);
-    pinMode(pwm_pin, OUTPUT);
+    Serial.printf("Initalize Analog PWM Pin %d (Period = %d   Freq = %d)\n", pwm_pin, period, freq);
+
+    if (5000000 % freq == 0)
+    {
+        PWM_PERIOD = 5000000 / PWM_FREQUENCE;
+    } else 
+    {
+        PWM_PERIOD = 320;
+        freq = 5000000 / PWM_PERIOD;
+    }
+    
+    if (pwm_pin == PWM_PIN)
+    {
+        io_info[0][0] = PinToGPIOMux(pwm_pin);
+        io_info[0][1] = PinToGPIOMuxFunc(pwm_pin);
+        io_info[0][2] = pwm_pin;
+        pwm_duty_init[0] = 0;
+    } else {
+        io_info[1][0] = PinToGPIOMux(pwm_pin);
+        io_info[1][1] = PinToGPIOMuxFunc(pwm_pin);
+        io_info[1][2] = pwm_pin;
+        pwm_duty_init[1] = 0;
+    }
+    // Initialize
+    pwm_init(PWM_PERIOD, pwm_duty_init, PWM_WPIN == 0 ? 1 : 2, io_info);
+  
+    // Commit
+    pwm_start();
+  
+//    analogWriteFreq(freq);  // 10kHz
+//    analogWriteRange(period);
+//    pinMode(pwm_pin, OUTPUT);
 #endif
 }
 
@@ -142,17 +210,26 @@ void pwmWrite(uint8_t pwm_pin, int32_t duty)
         ledcWrite(1, duty);
     }
 #else
-    analogWrite(pwm_pin, duty);
+    if (pwm_pin == PWM_PIN)
+    {
+        pwm_set_duty(duty, 0);
+    } else {
+        pwm_set_duty(duty, 1);
+    }
+      pwm_start(); // commit
+
+//    analogWrite(pwm_pin, duty);
 #endif
 }
 
 void rebootSystem()
 {
-#ifdef ARDUINO_ARCH_ESP32
     ESP.restart();
-#else
-    ESP.reset();
-#endif
+//#ifdef ARDUINO_ARCH_ESP32
+//
+//#else
+//    ESP.reset();
+//#endif
 }
 
 float mapfloat(float x, long in_min, long in_max, long out_min, long out_max)
@@ -610,6 +687,8 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     if (strcmp(topic, "set_bright") == 0)
     {
         set_state = atoi((char *)payload);
+        if (set_state < 0) set_state = 0;
+        if (set_state > 100) set_state = 100;
     } else 
     {
         set_ct = atoi((char *)payload);
