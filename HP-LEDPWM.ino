@@ -2,13 +2,16 @@
   #include <WiFi.h>
   #include <HTTPUpdate.h>
   #include <math.h>
+  #include <driver/dac.h>
+  #include <driver/ledc.h>
+  #include <rom/rtc.h>
   #define ESPhttpUpdate httpUpdate
 #else
   #include <ESP8266WiFi.h>
   #include <ESP8266httpUpdate.h>
-extern "C"{
-    #include "pwm.h"
-}
+  extern "C"{
+      #include "pwm.h"
+  }
 #endif
 #include <PubSubClient.h>
 #include <Ticker.h>
@@ -24,10 +27,11 @@ uint8_t  PWM_PIN = 3;
 uint8_t  PWM_WPIN = 0;
 uint8_t  PWM_SCR_TRIGGER = 0;
 int16_t  PWM_SCR_DELAY = 0;
+uint8_t  PWM_AUTO_FULL_POWER = 1;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.12"
+#define _VERSION "2.14"
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
@@ -89,6 +93,7 @@ const hp_cfg_t def_cfg[] = {
   {78, sizeof(int16_t), (int16_t)0,   &PWM_SCR_DELAY, false},       // UINT16: SCR MODE ZeroDetect DELAY
   {80, sizeof(uint8_t), (uint8_t)0,   &CFG_RESET_PIN, false},       // UINT8:  RESET PIN
   {81, sizeof(uint8_t), (uint8_t)5,   &EN_PORT, false},             // UINT8:  EN PIN
+  {82, sizeof(uint8_t), (uint8_t)1,   &PWM_AUTO_FULL_POWER, false}, // UINT8:  AUTO FULL POWER
   {96, sizeof(uint8_t), (uint8_t)0, NULL, true},                    // STRING: SSID
   {128, sizeof(uint8_t), (uint8_t)0, NULL, true},                   // STRING: WIFI PASSWORD 
   {160, sizeof(mqtt_server), (uint8_t)0, mqtt_server, true},        // STRING: MQTT SERVER
@@ -151,11 +156,25 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
         dac_output_enable(pwm_pin == 101 ? DAC_CHANNEL_1 : DAC_CHANNEL_2);
     } else if (pwm_pin == PWM_PIN)
     {
-        ledcAttachPin(pwm_pin, 0);
         ledcSetup(0, freq, bits);
+        if (OUTPUT_BY_MOSFET == 0)
+        {
+            ledcWrite(0, 0);
+        } else 
+        {
+            ledcWrite(0, PWM_PERIOD);
+        }
+        ledcAttachPin(pwm_pin, 0);
     } else {
-        ledcAttachPin(pwm_pin, 1);
         ledcSetup(1, freq, bits);
+        if (OUTPUT_BY_MOSFET == 0)
+        {
+            ledcWrite(1, 0);
+        } else 
+        {
+            ledcWrite(1, PWM_PERIOD);
+        }
+        ledcAttachPin(pwm_pin, 1);
     }
 #else
     Serial.printf("Initalize Analog PWM Pin %d (Period = %d   Freq = %d)\n", pwm_pin, period, freq);
@@ -174,18 +193,27 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
         io_info[0][0] = PinToGPIOMux(pwm_pin);
         io_info[0][1] = PinToGPIOMuxFunc(pwm_pin);
         io_info[0][2] = pwm_pin;
-        pwm_duty_init[0] = 0;
+        pwm_duty_init[0] = OUTPUT_BY_MOSFET ? PWM_PERIOD : 0;
     } else {
         io_info[1][0] = PinToGPIOMux(pwm_pin);
         io_info[1][1] = PinToGPIOMuxFunc(pwm_pin);
         io_info[1][2] = pwm_pin;
-        pwm_duty_init[1] = 0;
+        pwm_duty_init[1] = OUTPUT_BY_MOSFET ? PWM_PERIOD : 0;
     }
+    digitalWrite(pwm_pin, OUTPUT_BY_MOSFET ? HIGH : LOW);
     // Initialize
     pwm_init(PWM_PERIOD, pwm_duty_init, PWM_WPIN == 0 ? 1 : 2, io_info);
   
+    digitalWrite(pwm_pin, OUTPUT_BY_MOSFET ? HIGH : LOW);
+    if (pwm_pin == PWM_PIN)
+    {
+        pwm_set_duty(OUTPUT_BY_MOSFET ? PWM_PERIOD : 0, 0);
+    } else {
+        pwm_set_duty(OUTPUT_BY_MOSFET ? PWM_PERIOD : 0, 1);
+    }
     // Commit
     pwm_start();
+    digitalWrite(pwm_pin, OUTPUT_BY_MOSFET ? HIGH : LOW);
   
 //    analogWriteFreq(freq);  // 10kHz
 //    analogWriteRange(period);
@@ -241,7 +269,7 @@ void updatePWMValue(float set_state)
 {
     int pwm_state = mapfloat(set_state, 0, 100, PWM_START, PWM_END);
     if (pwm_state == PWM_START) pwm_state = 0;
-    if (pwm_state == PWM_END) pwm_state = PWM_PERIOD;
+    if (pwm_state == PWM_END && PWM_AUTO_FULL_POWER) pwm_state = PWM_PERIOD;
     if (PWM_WPIN != 0)
     {
         float set_power = 0.5 + (set_ct - 4100) / 3000.;
@@ -358,7 +386,7 @@ void setup() {
   rst_info *resetInfo;
   resetInfo = ESP.getResetInfoPtr();
 #else
-//  rtc_get_reset_reason(0)
+  int resetCode = rtc_get_reset_reason(0);
 #endif
 
   cfg_begin();
@@ -369,49 +397,6 @@ void setup() {
       CFG_INIT(true);
       CFG_LOAD();
   }
-
-#ifdef ARDUINO_ARCH_ESP8266
-  if ((resetInfo->reason == REASON_DEFAULT_RST || resetInfo->reason == REASON_EXT_SYS_RST) && PWM_PIN != 0)
-#endif
-  {
-      boot_count = boot_count_increase();
-      ignoreOutput = true;
-      uint32_t last_state_hold = millis();
-      last_set_state = 0;
-      SMOOTH_INTERVAL = 200;
-      while (millis() - last_state_hold < SMOOTH_INTERVAL)
-      {
-          updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
-      }
-      ignoreOutput = false;
-  }
-  
-  if (CFG_RESET_PIN != 0)
-  {
-      pinMode(CFG_RESET_PIN, INPUT_PULLUP);
-      delay(1);
-      if (digitalRead(CFG_RESET_PIN) == LOW)
-      {
-          Serial.printf("Reset config by RESET PIN %d\n", CFG_RESET_PIN);
-          CFG_INIT(false);
-          CFG_LOAD();
-      }
-  } else {
-      if (boot_count > 5)
-      {
-          Serial.printf("Reset config by Reboot 5 times\n");
-          CFG_INIT(false);
-          CFG_LOAD();
-      }
-  }
-
-  boot_time = millis();
-  if (PWM_PIN != LED_BUILTIN)
-  {
-      digitalWrite(LED_BUILTIN, LOW);
-  }  
-  
-//  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
 
   char *p;
   char chEEP;
@@ -432,14 +417,81 @@ void setup() {
       rebootSystem();
   }
   
+  analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_PIN);
+  if (PWM_WPIN != 0)
+  {
+      analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_WPIN);
+  }
+  delay(100);
+#ifdef ARDUINO_ARCH_ESP8266
+  if ((resetInfo->reason == REASON_DEFAULT_RST || resetInfo->reason == REASON_EXT_SYS_RST) && strlen(ssid) != 0)
+#else
+  if ((resetCode == POWERON_RESET) && strlen(ssid) != 0)
+#endif
+  {
+      ignoreOutput = true;
+      uint32_t last_state_hold = millis();
+      last_set_state = 0;
+      SMOOTH_INTERVAL = 200;
+      while (millis() - last_state_hold < SMOOTH_INTERVAL)
+      {
+          updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
+      }
+      ignoreOutput = false;
+      boot_count = boot_count_increase();
+  }
+  
+  if (CFG_RESET_PIN != 0)
+  {
+      pinMode(CFG_RESET_PIN, INPUT_PULLUP);
+      delay(1);
+      if (digitalRead(CFG_RESET_PIN) == LOW)
+      {
+          Serial.printf("Reset config by RESET PIN %d\n", CFG_RESET_PIN);
+          CFG_INIT(false);
+          CFG_LOAD();
+          rebootSystem();
+      }
+  } else {
+      if (boot_count > 5)
+      {
+          Serial.printf("Reset config by Reboot 5 times\n");
+          CFG_INIT(false);
+          CFG_LOAD();
+          rebootSystem();
+      }
+  }
+
+  boot_time = millis();
+  if (PWM_PIN != LED_BUILTIN)
+  {
+      digitalWrite(LED_BUILTIN, LOW);
+  }  
+  
+//  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
+
   Serial.printf("\n");
   Serial.printf("CONFIG SRC: %s\n", cfg_spiffs() ? "SPIFFS" : "EEPROM");
-  Serial.printf("SSID = %s  PASSWORD = %s\n", ssid, password);
   Serial.printf("Boot Count: %d\n", boot_count);
+#ifdef ARDUINO_ARCH_ESP8266
+  Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
+  Serial.printf("Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
+#else
+  Serial.printf("Reset Reason: %d\n", resetCode);
+#endif
+  Serial.printf("Version: %s\n", VERSION);
+  Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
+  
   if (strlen(ssid) == 0)
   {
       WiFi.mode(WIFI_AP);
+      
+      uint32_t t_start = micros();
+      while (micros() - t_start <= 100) yield();
+      
+#ifdef ARDUINO_ARCH_ESP8266
       WiFi.softAPConfig(IPAddress(192,168,32,1), IPAddress(192,168,32,1), IPAddress(255, 255, 255, 0)); // Set AP Address
+#endif
       while(!WiFi.softAP(mqtt_cls)){}; // Startup AP
  
       WiFiServer telnetServer(23);
@@ -455,6 +507,9 @@ void setup() {
       {
           if (!telnetClient && (telnetClient = telnetServer.available()))
           {
+//              delay(100);
+              t_start = micros();
+              while (micros() - t_start <= 100) yield();
               while (telnetClient.available()) telnetClient.read();
               telnetClient.printf("Please input SSID: ");
           }
@@ -596,11 +651,6 @@ void setup() {
   }
 
   WiFi.mode(WIFI_STA);
-  analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_PIN);
-  if (PWM_WPIN != 0)
-  {
-      analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_WPIN);
-  }
 
   WiFi.begin(ssid, password);
   updatePWMValue(set_state);
@@ -608,13 +658,8 @@ void setup() {
   
   ignoreOutput = true;
   Serial.printf("\n");
+  Serial.printf("SSID = %s  PASSWORD = %s\n", ssid, password);
   Serial.printf("PWM Frequence = %d   Range = %d - %d   Period = %d\n", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD);
-#ifdef ARDUINO_ARCH_ESP8266
-  Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
-  Serial.printf("Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
-#endif
-  Serial.printf("Version: %s\n", VERSION);
-  Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
   Serial.printf("PWM PIN: %d  WARM PIN: %d  MODE: %d  CFG RESET PIN: %d\n", PWM_PIN, PWM_WPIN, OUTPUT_BY_MOSFET, CFG_RESET_PIN);
   Serial.print("Connecting to WiFi");
   uint32_t last_print_dot = millis();
@@ -813,12 +858,14 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   {
       payload[length] = 0;
       OUTPUT_BY_MOSFET = atoi((char *)payload);
+      updatePWMValue(set_state);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_pwm_trigger") == 0)
   {
       payload[length] = 0;
       PWM_SCR_TRIGGER = atoi((char *)payload);
+      updatePWMValue(set_state);
       CFG_SAVE();
       sendMeta();
       rebootSystem();
@@ -826,6 +873,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   {
       payload[length] = 0;
       PWM_SCR_DELAY = atoi((char *)payload);
+      updatePWMValue(set_state);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_config_pin") == 0)
@@ -840,6 +888,13 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       EN_PORT = atoi((char *)payload);
       CFG_SAVE();
       sendMeta();
+  } else if (strcmp(topic, "set_auto_full_power") == 0)
+  {
+      payload[length] = 0;
+      PWM_AUTO_FULL_POWER = atoi((char *)payload);
+      updatePWMValue(set_state);
+      CFG_SAVE();
+      sendMeta();      
   } else if (strcmp(topic, "reset") == 0)
   {
       if (length > 0 && payload[0] == '1')
@@ -862,7 +917,9 @@ void sendMeta()
   // max length = 64 - 21
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"");
     p += CFG_READ_STRING(32, p, 32);
-    p = p + sprintf(p, "\",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d,\"pin\":%d,\"wpin\":%d,\"mode\":%d,\"cfg_pin\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD, PWM_PIN, PWM_WPIN, OUTPUT_BY_MOSFET, CFG_RESET_PIN);
+    p = p + sprintf(p, "\",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD);
+    client.publish("dev", msg_buf);
+    p = msg_buf + sprintf(msg_buf, "{\"pin\":%d,\"wpin\":%d,\"mode\":%d,\"cfg_pin\":%d,\"auto_full_power\":%d}", PWM_PIN, PWM_WPIN, OUTPUT_BY_MOSFET, CFG_RESET_PIN, PWM_AUTO_FULL_POWER);
     client.publish("dev", msg_buf);
 }
 

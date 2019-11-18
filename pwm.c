@@ -17,6 +17,7 @@
  */
 
 /* Set the following three defines to your needs */
+#ifdef ARDUINO_ARCH_ESP8266
 
 #ifndef SDK_PWM_PERIOD_COMPAT_MODE
   #define SDK_PWM_PERIOD_COMPAT_MODE 0
@@ -186,8 +187,7 @@ pwm_init(uint32_t period, uint32_t *duty, uint32_t pwm_channel_num,
       pwm_set_duty(duty[n], n);
   }
   GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, all);
-  GPIO_REG_WRITE(GPIO_ENABLE_W1TS_ADDRESS, all);
-
+  
   pwm_set_period(period);
 
 #if PWM_USE_NMI
@@ -196,11 +196,13 @@ pwm_init(uint32_t period, uint32_t *duty, uint32_t pwm_channel_num,
   ETS_FRC_TIMER1_INTR_ATTACH(pwm_intr_handler, NULL);
 #endif
   TM1_EDGE_INT_ENABLE();
-
+  
   timer->frc1_int &= ~FRC1_INT_CLR_MASK;
   timer->frc1_ctrl = 0;
 
   pwm_start();
+
+  GPIO_REG_WRITE(GPIO_ENABLE_W1TS_ADDRESS, all);
 }
 
 __attribute__ ((noinline))
@@ -446,3 +448,5 @@ set_pwm_debug_en(uint8_t print_en)
 {
   (void) print_en;
 }
+
+#endif
