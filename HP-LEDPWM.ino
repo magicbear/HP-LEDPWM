@@ -39,10 +39,11 @@ uint8_t  PWM_AUTO_FULL_POWER = 1;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.28"
+#define _VERSION "2.29"
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
+#define timer1_write(value) timerAlarmWrite(timer, value, true)
 #else
 #define VERSION _VERSION
   #define PWM_CHANNELS 2
@@ -86,14 +87,18 @@ uint32_t zc_interval = 0;
 uint32_t zc_last = 0;
 uint32_t last_zc_interval = 0;
 
+uint8_t  AUTO_SAVE_DISABLED = 0;
+
 int retry_failed_count = 0;
 
 char mqtt_cls[sizeof(MQTT_CLASS) + 13];
 char msg_buf[160];
 
+uint8_t BRIGHT_ADC_PIN = 0;
 
 #ifdef ARDUINO_ARCH_ESP32
 uint16_t OLD_PWM_FREQ = 0;
+hw_timer_t * timer = NULL;
 #endif
 
 const hp_cfg_t def_cfg[] = {
@@ -121,6 +126,8 @@ const hp_cfg_t def_cfg[] = {
   {84, sizeof(uint16_t), (uint16_t)500, &STARTUP_SMOOTH_INTERVAL, true},    // UINT16: STARTUP SMOOTH INTERVAL
   {86, sizeof(uint8_t), (uint8_t)0,   &PWM_SOURCE, false},             // UINT8:  PWM_SOURCE
   {87, sizeof(uint8_t), (uint8_t)0,   &PWM_SOURCE_DUTY, false},             // UINT8:  PWM_SOURCE
+  {88, sizeof(uint8_t), (uint8_t)0,   &BRIGHT_ADC_PIN, false},             // UINT8:  BRIGHT_ADC_PIN
+  {89, sizeof(uint8_t), (uint8_t)0,   &AUTO_SAVE_DISABLED, false},             // UINT8:  BRIGHT_ADC_PIN
   {96, 0, (uint8_t)0, &ssid, true},                    // STRING: SSID
   {128, 0, (uint8_t)0, &password, true},                   // STRING: WIFI PASSWORD 
   {160, 0, (uint8_t)0, &mqtt_server, true},        // STRING: MQTT SERVER
@@ -143,6 +150,8 @@ bool otaMode = true;                             //OTA mode flag
 bool hasPacket = false;
 uint32_t boot_time;
 bool bootCountReset = false;
+
+int16_t lastAdcValue = 0;
 
 #ifdef ARDUINO_ARCH_ESP8266
 uint32_t PinToGPIOMuxFunc(uint8_t pin)
@@ -419,15 +428,70 @@ void updatePWMValue(float set_state)
     }
 }
 
-void ICACHE_RAM_ATTR onTimerISR(){
-    // 打开SCR
-    if (scr_current_bright != 0)
+uint8_t ZC = 0;
+uint8_t justZeroCrossing = 0;
+uint32_t ZC_id = 0;
+uint32_t lastZC_id = 0;
+bool timerRunning = false;
+bool scrState = 0;
+
+inline void updateSCRState(bool state)
+{
+    scrState = state;
+    if (state == false)
     {
+        if (scr_current_bright != PWM_PERIOD)
+        {
+            digitalWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? LOW : HIGH);
+        }
+    } else 
+    {
+        // 打开SCR
         digitalWrite(PWM_PIN,  isChannelInvert(PWM_PIN) ? HIGH : LOW);
     }
 }
 
-uint8_t ZC = 0;
+void ICACHE_RAM_ATTR onTimerISR(){
+    if (PWM_SCR_DELAY != 0)
+    {
+          uint16_t on_time = (float(scr_current_bright) / PWM_PERIOD * zc_interval); // SCR打开时间
+          bool using_cycleTime = on_time * 2 / zc_interval > 0;
+          uint32_t zc_cycle = micros() - zc_last;
+
+          // (using_cycleTime && zc_cycle <= PWM_SCR_DELAY + 30) || (!using_cycleTime && 
+          if (justZeroCrossing == 1)
+          {
+              justZeroCrossing = 2;
+              // 新过零触发，旧触发开启中
+              if (scr_current_bright != PWM_PERIOD)
+              {
+                  updateSCRState(false); // 过零触发，关闭SCR
+                  timer1_write(5 * (zc_interval - on_time + ((int32_t)PWM_SCR_DELAY - (int32_t)zc_cycle)));
+//                  Serial.printf("w %d %d\n", zc_interval - on_time + ((int32_t)(PWM_SCR_DELAY - (int32_t)zc_cycle)), on_time);
+              } else {
+                  timerRunning = false;
+              }
+          } else if (scr_current_bright != 0)
+          {
+              lastZC_id = ZC_id + 1;
+              updateSCRState(true); // 打开SCR
+              justZeroCrossing = 1;
+              timer1_write(5 * (on_time));
+          }
+    }
+    // 打开SCR
+    else if (scr_current_bright != 0)
+    {
+        timerRunning = false;
+        updateSCRState(true); // 打开SCR
+        if (PWM_SCR_DELAY != 0 && ZC && !justZeroCrossing)
+        {
+            timer1_write(5 * PWM_SCR_DELAY);
+            justZeroCrossing = 1;
+        }
+    }
+}
+
 void ICACHE_RAM_ATTR ZC_detect()
 {
     inTrigger = 1;
@@ -448,14 +512,25 @@ void ICACHE_RAM_ATTR ZC_detect()
         zc_last = micros();
         ZC = 1;
 
-        // 过零触发，关闭SCR
-        if (scr_current_bright != PWM_PERIOD)
-        {
-            digitalWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? LOW : HIGH);
-        }
         // DIV 16 = 80/16 = 5 Mhz = 0.2us per tick
         // 1us = 5 tick
-        timer1_write(5 * (zc_interval - (PWM_SCR_DELAY + float(scr_current_bright) / PWM_PERIOD * zc_interval)));
+        if (PWM_SCR_DELAY != 0)
+        {
+            if (scr_current_bright == PWM_PERIOD)
+            {
+                updateSCRState(true); // 过零触发，关闭SCR
+            } else if (!timerRunning)
+            {
+                justZeroCrossing = 1;
+                ZC_id = ZC_id + 1;
+                timerRunning = true;
+                timer1_write(5 * PWM_SCR_DELAY);
+            }
+        } else {
+            updateSCRState(false); // 过零触发，关闭SCR
+            timerRunning = true;
+            timer1_write(5 * (zc_interval - (float(scr_current_bright) / PWM_PERIOD * zc_interval)));
+        }
     }
     inTrigger = 0;
 }
@@ -466,12 +541,20 @@ void inline disableInterrupts()
 #if DEBUG_LEVEL >= 3
   Serial.printf("Disable interrupt\n");
 #endif
+  timerRunning = false;
   if (PWM_SCR_TRIGGER != 0)
   {
      detachInterrupt(PWM_SCR_TRIGGER);
+#if ARDUINO_ARCH_ESP8266
      timer1_detachInterrupt();
      timer1_disable();
      timer1_isr_init();
+#elif ARDUINO_ARCH_ESP32
+     if (timer != NULL)
+     {
+        timerEnd(timer);
+     }
+#endif
   }
 }
 
@@ -494,9 +577,19 @@ void inline enableInterrupts()
       {
           if (WORK_MODE == 2 || WORK_MODE == 3) {
               //Initialize Ticker every 0.5s
+#if ARDUINO_ARCH_ESP8266
               timer1_disable();
               timer1_attachInterrupt(onTimerISR);
               timer1_enable(TIM_DIV16, TIM_EDGE, TIM_SINGLE);
+#elif ARDUINO_ARCH_ESP32
+              if (timer != NULL)
+              {
+                  timerEnd(timer);
+              }              
+              timer = timerBegin(0, 16, false); // timer_id = 0; divider=80; countUp = true;
+              timerAttachInterrupt(timer, &onTimerISR, true);
+              timerAlarmEnable(timer);
+#endif
           }
       }
   }
@@ -814,7 +907,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     }
     SMOOTH_INTERVAL = 200;
     payload[length] = 0;
-    save_config = true;
+    save_config = !AUTO_SAVE_DISABLED && true;
     if (strchr((char *)payload, ',') != NULL)
     {
         save_config = false;
@@ -1036,6 +1129,13 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       updatePWMValue(set_state);
       CFG_SAVE();
       sendMeta();
+  } else if (strcmp(topic, "set_adc_pin") == 0)
+  {
+      payload[length] = 0;
+      BRIGHT_ADC_PIN = atoi((char *)payload);
+      updatePWMValue(set_state);
+      CFG_SAVE();
+      sendMeta();
   } else if (strcmp(topic, "set_auto_full_power") == 0)
   {
       payload[length] = 0;
@@ -1043,12 +1143,19 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       updatePWMValue(set_state);
       CFG_SAVE();
       sendMeta();
+  } else if (strcmp(topic, "set_autosave") == 0)
+  {
+      payload[length] = 0;
+      AUTO_SAVE_DISABLED = atoi((char *)payload);
+      updatePWMValue(set_state);
+      CFG_SAVE();
+      sendMeta();      
   } else if (strcmp(topic, "set_startup_smooth") == 0)
   {
       payload[length] = 0;
       STARTUP_SMOOTH_INTERVAL = atoi((char *)payload);
       CFG_SAVE();
-      sendMeta();      
+      sendMeta();
   } else if (strcmp(topic, "reset") == 0)
   {
       if (length > 0 && payload[0] == '1')
@@ -1071,7 +1178,7 @@ void sendMeta()
     last_send_meta = millis();
   // max length = 64 - 21
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"%s\"", dev_name);
-    p = p + sprintf(p, ",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d,\"en1\":%d,\"en2\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD, EN_PORT_CH1, EN_PORT_CH2);
+    p = p + sprintf(p, ",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d,\"en1\":%d,\"en2\":%d,\"adc\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD, EN_PORT_CH1, EN_PORT_CH2, BRIGHT_ADC_PIN);
     client.publish("dev", msg_buf);
     if (WORK_MODE == 2 || WORK_MODE == 3)
     {
@@ -1079,7 +1186,7 @@ void sendMeta()
         client.publish("dev", msg_buf);        
     }
     
-    p = msg_buf + sprintf(msg_buf, "{\"pin\":%d,\"wpin\":%d,\"pwm_src\":%d, \"duty\":%d,\"mode\":%d,\"cfg_pin\":%d,\"auto_full_power\":%d,\"startup_smooth\":%d}", PWM_PIN, PWM_WPIN, PWM_SOURCE, PWM_SOURCE_DUTY, WORK_MODE, CFG_RESET_PIN, PWM_AUTO_FULL_POWER, STARTUP_SMOOTH_INTERVAL);
+    p = msg_buf + sprintf(msg_buf, "{\"pin\":%d,\"wpin\":%d,\"pwm_src\":%d, \"duty\":%d,\"mode\":%d,\"cfg_pin\":%d,\"auto_full_power\":%d,\"no_autosave\":%d,\"startup_smooth\":%d}", PWM_PIN, PWM_WPIN, PWM_SOURCE, PWM_SOURCE_DUTY, WORK_MODE, CFG_RESET_PIN, PWM_AUTO_FULL_POWER, AUTO_SAVE_DISABLED, STARTUP_SMOOTH_INTERVAL);
     client.publish("dev", msg_buf);
 }
 
@@ -1190,6 +1297,22 @@ void loop() {
           sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", set_state, rssi, VERSION, millis());
       }
       client.publish("status", msg_buf);
+   }
+   if (BRIGHT_ADC_PIN != 0)
+   {
+      int16_t new_adc_value = analogRead(BRIGHT_ADC_PIN);
+      if (abs(new_adc_value - lastAdcValue) > 4096/20)
+      {
+        delay(50);
+        int16_t new_adc_value2 = analogRead(BRIGHT_ADC_PIN);
+        if (abs(new_adc_value - new_adc_value2) < 100 && abs(new_adc_value - lastAdcValue) > 4096/20)
+        {
+          Serial.printf("Change value: %d\n", abs(new_adc_value - lastAdcValue));
+            sprintf(msg_buf, "%d", (uint32_t)new_adc_value * 100 / 4096);
+            lastAdcValue = new_adc_value;
+            callback("set_bright", (byte *)msg_buf, strlen(msg_buf));
+        }
+      }
    }
 
    if (millis() - last_send_meta >= 60000)
