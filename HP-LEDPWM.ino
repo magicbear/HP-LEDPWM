@@ -5,6 +5,7 @@
   #include <driver/dac.h>
   #include <driver/ledc.h>
   #include <rom/rtc.h>
+  #include <esp_task_wdt.h>
   #define ESPhttpUpdate httpUpdate
 #elif ARDUINO_ARCH_ESP8266
   #include <ESP8266WiFi.h>
@@ -43,7 +44,7 @@ uint8_t  PWM_AUTO_FULL_POWER = 1;
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
-#define timer1_write(value) timerAlarmWrite(timer, value, true)
+#define timer1_write(value) if (timer != NULL) { timerWrite(timer, 5000000 - value); timerAlarmEnable(timer); }
 #else
 #define VERSION _VERSION
   #define PWM_CHANNELS 2
@@ -51,7 +52,7 @@ uint8_t  PWM_AUTO_FULL_POWER = 1;
   uint32 io_info[PWM_CHANNELS][3];
   
   // PWM initial duty: all off
-  uint32 pwm_duty_init[PWM_CHANNELS];  
+  uint32 pwm_duty_init[PWM_CHANNELS];
 #endif
 
 #endif
@@ -112,7 +113,7 @@ const hp_cfg_t def_cfg[] = {
 #endif
   {66, sizeof(uint16_t), (uint16_t)0,     &PWM_START, false},       // UINT16: PWM START
   {68, sizeof(uint16_t), (uint16_t)200,   &PWM_END, false},         // UINT16: PWM END
-  {70, sizeof(uint16_t), (uint16_t)4100,  &set_ct, false},          // UINT16: COLOR TEMPERATURE
+  {70, sizeof(uint16_t), (uint16_t)4100,  &set_ct, false},          // UINT16: COLOR TEMPERATURE / BRIGHT 2
   {72, sizeof(uint16_t), (uint16_t)200,   &PWM_PERIOD, false},      // UINT16: PWM PERIOD
   {74, sizeof(uint8_t), (uint8_t)0,   &PWM_PIN, false},             // UINT8:  PWM_PIN
   {75, sizeof(uint8_t), (uint8_t)0,   &PWM_WPIN, false},            // UINT8:  PWM_WPIN
@@ -203,13 +204,20 @@ bool isChannelInvert(uint8_t pin)
 void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
 {
     bool auto_update_pwm_end = false;
+#if DEBUG_LEVEL >= 3
+    Serial.printf("Initalize Analog PWM Pin %d (Period = %d   Freq = %d)\n", pwm_pin, period, freq);
+#endif
 #ifdef ARDUINO_ARCH_ESP32
     uint8_t bits = (int)log2(period)+1;
     if (pow(2, log2(period)) == period)
     {
         bits--;
     }
-    if (pwm_pin == 101 || pwm_pin == 102) 
+    if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
+    {
+        pinMode(pwm_pin, OUTPUT);
+        digitalWrite(pwm_pin, HIGH);
+    } else if (pwm_pin == 101 || pwm_pin == 102) 
     {
         dac_output_enable(pwm_pin == 101 ? DAC_CHANNEL_1 : DAC_CHANNEL_2);
     } else if (pwm_pin == PWM_PIN)
@@ -233,9 +241,6 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
         ledcAttachPin(pwm_pin, 2);
     }
 #else
-    #if DEBUG_LEVEL >= 3
-    Serial.printf("Initalize Analog PWM Pin %d (Period = %d   Freq = %d)\n", pwm_pin, period, freq);
-    #endif
     if (PWM_END == PWM_PERIOD)
     {
         auto_update_pwm_end = true;
@@ -280,7 +285,7 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
         // Commit
         pwm_start(); 
         digitalWrite(pwm_pin, isChannelInvert(pwm_pin) ? PWM_PERIOD : 0);
-    } else if (WORK_MODE == 2 || WORK_MODE == 3)
+    } else if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
     {
         digitalWrite(pwm_pin, isChannelInvert(pwm_pin) ? LOW : HIGH);
     }
@@ -289,7 +294,7 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
 
 void pwmWrite(uint8_t pwm_pin, int32_t duty)
 {
-    if (WORK_MODE == 2 || WORK_MODE == 3) return;
+    if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4) return;
 #ifdef ARDUINO_ARCH_ESP32
     if (pwm_pin == 101)
     {
@@ -410,7 +415,7 @@ void updatePWMValue(float set_state)
             }
         }
         
-        if (WORK_MODE != 2 && WORK_MODE != 3)
+        if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
         {
             pwmWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? PWM_PERIOD - pwm_state : pwm_state);       
         } else 
@@ -418,7 +423,7 @@ void updatePWMValue(float set_state)
             scr_current_bright = pwm_state;
         }
         #if DEBUG_LEVEL >= 2
-        if (WORK_MODE != 2 && WORK_MODE != 3 && !ignoreOutput)
+        if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4 && !ignoreOutput)
             Serial.printf("Set Power Power %f  => %d\n", set_state, pwm_state);
         #endif
     }
@@ -440,14 +445,20 @@ inline void updateSCRState(bool state)
     scrState = state;
     if (state == false)
     {
-        if (scr_current_bright != PWM_PERIOD)
+#if DEBUG_LEVEL >= 5
+        Serial.printf("S %ld\n", micros());
+#endif
+//        if (scr_current_bright != PWM_PERIOD)
         {
-            digitalWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? LOW : HIGH);
+            digitalWrite(PWM_PIN, HIGH);
         }
     } else 
     {
+#if DEBUG_LEVEL >= 5
+        Serial.printf("O %ld\n", micros());
+#endif
         // 打开SCR
-        digitalWrite(PWM_PIN,  isChannelInvert(PWM_PIN) ? HIGH : LOW);
+        digitalWrite(PWM_PIN, LOW);
     }
 }
 
@@ -528,8 +539,15 @@ void ICACHE_RAM_ATTR ZC_detect()
             }
         } else {
             updateSCRState(false); // 过零触发，关闭SCR
-            timerRunning = true;
-            timer1_write(5 * (zc_interval - (float(scr_current_bright) / PWM_PERIOD * zc_interval)));
+            if (scr_current_bright != 0){
+                timerRunning = true;
+                long tSleepus = map(scr_current_bright, PWM_START, PWM_PERIOD, 5 * zc_interval, 0);
+    #if DEBUG_LEVEL >= 5
+                Serial.printf("T: %d\n", tSleepus);
+    #endif
+    //(zc_interval - (float(scr_current_bright) / PWM_PERIOD * zc_interval)
+                timer1_write(tSleepus);
+            }
         }
     }
     inTrigger = 0;
@@ -569,13 +587,17 @@ void inline enableInterrupts()
       {
           pinMode(PWM_SCR_TRIGGER, INPUT_PULLUP);
           attachInterrupt(PWM_SCR_TRIGGER, ZC_detect, RISING);       // Enable external interrupt (INT0)
-      } else {        
+      } else if (WORK_MODE == 3) {        
           pinMode(PWM_SCR_TRIGGER, INPUT_PULLUP);
           attachInterrupt(PWM_SCR_TRIGGER, ZC_detect, FALLING);       // Enable external interrupt (INT0)
+      } else if (WORK_MODE == 4) {        
+          pinMode(PWM_SCR_TRIGGER, INPUT_PULLUP);
+          attachInterrupt(PWM_SCR_TRIGGER, ZC_detect, CHANGE);       // Enable external interrupt (INT0)
       }
+//      pinMode(PWM_PIN, 
 //      if (IN_STARTUP)
       {
-          if (WORK_MODE == 2 || WORK_MODE == 3) {
+          if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4) {
               //Initialize Ticker every 0.5s
 #if ARDUINO_ARCH_ESP8266
               timer1_disable();
@@ -585,10 +607,12 @@ void inline enableInterrupts()
               if (timer != NULL)
               {
                   timerEnd(timer);
-              }              
-              timer = timerBegin(0, 16, false); // timer_id = 0; divider=80; countUp = true;
+              }
+              timer = timerBegin(0, getApbFrequency() / 5000000, true); // timer_id = 0; divider=80; countUp = true;
               timerAttachInterrupt(timer, &onTimerISR, true);
+              timerAlarmWrite(timer, 5000000, false);
               timerAlarmEnable(timer);
+//              timerAlarmEnable(timer);
 #endif
           }
       }
@@ -601,64 +625,9 @@ void inline enableInterrupts()
 //  while(micros() - start < us){ yield(); }
 //}
 
-void inline SCR_Process()
-{  
-   if (ZC)
-   {
-//        if (!IN_STARTUP)
-//        {
-//            if (WORK_MODE == 2 || WORK_MODE == 3)
-//            {
-////                int32_t delay_us = PWM_SCR_DELAY + float(scr_current_bright) / PWM_PERIOD * zc_interval;
-////                while (micros() - zc_last < delay_us);
-////                if (scr_current_bright != PWM_PERIOD)
-////                {
-////                    digitalWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? LOW : HIGH);
-////                }
-//                int32_t delay_us = zc_interval - (PWM_SCR_DELAY + float(scr_current_bright) / PWM_PERIOD * zc_interval) - (micros() - zc_last);
-//                if (delay_us > 0)
-//                {
-//                    delayMicroseconds(delay_us);
-//                }
-//                if (scr_current_bright != 0)
-//                {
-//                    digitalWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? HIGH : LOW);
-//                }
-//    //            pwmWrite(PWM_PIN, PWM_PERIOD - scr_current_bright); 
-//    //            delayMicroseconds(1000);  // 100us to activate MOC3021
-//    //            digitalWrite(PWM_PIN, LOW);
-//            } else {
-//              
-//                if (PWM_SCR_DELAY > 0)
-//                {
-//                    delayMicroseconds(PWM_SCR_DELAY);
-//                }
-//                analogPinInit(1000000 / zc_interval, PWM_PERIOD, PWM_PIN);
-//                pwmWrite(PWM_PIN, scr_current_bright); 
-//            }
-//        }
-        ZC = 0;
-        if (abs(zc_interval - last_zc_interval) >= 1000)
-        {
-#if DEBUG_LEVEL >= 3
-            Serial.printf("Zero Detect Interval: %d\n", zc_interval);
-#endif
-            last_zc_interval = zc_interval;
-        }
-   }
-}
-
 void setup() {
   uint16_t boot_count = 0;
   pinMode(LED_BUILTIN, OUTPUT);
-  if (EN_PORT_CH1 != 0)
-  {
-      pinMode(EN_PORT_CH1, INPUT);
-  }
-  if (EN_PORT_CH2 != 0)
-  {
-      pinMode(EN_PORT_CH2, INPUT);
-  }
   WiFi.persistent( false );
   Serial.begin(115200);
   byte mac[6];
@@ -678,14 +647,6 @@ void setup() {
   {
       CFG_INIT(true);
   }
-#ifdef ARDUINO_ARCH_ESP32
-  if (OLD_PWM_FREQ != 0 && PWM_FREQUENCE == 0)
-  {
-      Serial.printf("Set To OLD configure\n");
-      PWM_FREQUENCE = OLD_PWM_FREQ;
-      CFG_SAVE();
-  }
-#endif
   if (PWM_FREQUENCE == 0 || PWM_PERIOD == 0)
   {
       Serial.printf("Invalid PWM Frequence, reset configure\n");
@@ -695,15 +656,24 @@ void setup() {
   if (!cfgCheck)
   {
 #if ARDUINO_ARCH_ESP32
+      uint16_t pin35_value = analogRead(35);
       // >= V1.7.1 PCB Auto Settings
       pinMode(27, INPUT_PULLUP);
       pinMode(34, INPUT_PULLUP);
       pinMode(35, INPUT_PULLUP);
-#endif
       delay(100);
-#if ARDUINO_ARCH_ESP32
       // >= V1.7.1 PCB Auto Settings
-      if (digitalRead(34) == HIGH)
+      Serial.printf("AutoConf Resistor Value: %ld\n", pin35_value);
+      if (2400 <= pin35_value && pin35_value <= 2750) // 4.7k/10k with 5%
+      {
+          Serial.printf("Auto Initalize by PCB Board - SCR Version\n");
+          WORK_MODE = 4;
+          PWM_PIN = 4;
+          PWM_WPIN = 0;
+          EN_PORT_CH1 = 0;
+          EN_PORT_CH2 = 0;
+          PWM_SCR_TRIGGER = 5;
+      } else if (digitalRead(34) == HIGH)
       {
           Serial.printf("Auto Initalize by PCB Board - Dual CH\n");
           WORK_MODE = 0;
@@ -728,6 +698,14 @@ void setup() {
       }
 #endif
   }
+  if (EN_PORT_CH1 != 0)
+  {
+      pinMode(EN_PORT_CH1, INPUT);
+  }
+  if (EN_PORT_CH2 != 0)
+  {
+      pinMode(EN_PORT_CH2, INPUT);
+  }
 
   char *p;
   char chEEP;
@@ -749,7 +727,11 @@ void setup() {
 #ifdef ARDUINO_ARCH_ESP8266
   if ((resetInfo->reason == REASON_DEFAULT_RST || resetInfo->reason == REASON_EXT_SYS_RST) && strlen(ssid) != 0)
 #elif ARDUINO_ARCH_ESP32
-  if ((resetCode == POWERON_RESET) && strlen(ssid) != 0)
+  if (PWM_FREQUENCE <= 40000)
+  {
+      setCpuFrequencyMhz(80);
+  }
+  if ((resetCode == POWERON_RESET || resetCode == RTCWDT_RTC_RESET) && strlen(ssid) != 0)
 #endif
   {
       last_state_hold = millis();
@@ -793,7 +775,7 @@ void setup() {
   if (PWM_PIN != LED_BUILTIN)
   {
       digitalWrite(LED_BUILTIN, LOW);
-  }  
+  }
   
 //  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
 
@@ -805,6 +787,7 @@ void setup() {
   Serial.printf("Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
 #elif ARDUINO_ARCH_ESP32
   Serial.printf("Reset Reason: %d\n", resetCode);
+  Serial.printf("CPU Speed: %d MHz  XTAL: %d MHz  APB: %d Hz\n", getCpuFrequencyMhz(), getXtalFrequencyMhz(), getApbFrequency());
 #endif
   Serial.printf("Version: %s\n", VERSION);
   Serial.printf("Build Date: %s %s\n", __DATE__, __TIME__);
@@ -815,14 +798,14 @@ void setup() {
 #ifdef ARDUINO_ARCH_ESP8266
   updatePWMValue(set_state);
 #elif ARDUINO_ARCH_ESP32
-  updatePWMValue(0);
+  updatePWMValue(set_state);
 #endif
   
 //  ignoreOutput = true;
   Serial.printf("\n");
   Serial.printf("SSID = %s  PASSWORD = %s\n", ssid, password);
   Serial.printf("PWM Frequence = %d   Range = %d - %d   Period = %d\n", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD);
-  if (WORK_MODE == 2 || WORK_MODE == 3)
+  if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
   {
       Serial.printf("SCR PIN: %d  TRIGGER PIN: %d  MODE: %d  CFG RESET PIN: %d\n", PWM_PIN, PWM_SCR_TRIGGER, WORK_MODE, CFG_RESET_PIN);
   } else {
@@ -1180,7 +1163,7 @@ void sendMeta()
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"%s\"", dev_name);
     p = p + sprintf(p, ",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d,\"en1\":%d,\"en2\":%d,\"adc\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD, EN_PORT_CH1, EN_PORT_CH2, BRIGHT_ADC_PIN);
     client.publish("dev", msg_buf);
-    if (WORK_MODE == 2 || WORK_MODE == 3)
+    if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
     {
         p = msg_buf + sprintf(msg_buf, "{\"scr_delay\":%d,\"trigger_pin\":%d}", PWM_SCR_DELAY, PWM_SCR_TRIGGER);
         client.publish("dev", msg_buf);        
@@ -1208,15 +1191,27 @@ void reconnect() {//等待，直到连接上服务器
   }
   if (!client.connected()){
       Serial.print("Connecting to MQTT server...");
+#ifdef ARDUINO_ARCH_ESP32
+      esp_task_wdt_init(30, true);
+      esp_task_wdt_add(NULL);
+#endif
   }
   while (!client.connected()) {//如果没有连接上
+    Serial.printf(".");
     if (client.connect(mqtt_cls)) {//接入时的用户名，尽量取一个很不常用的用户名
       retry_failed_count = 0;
       Serial.printf(" success, login by: %s\n",mqtt_cls);
+#ifdef ARDUINO_ARCH_ESP32
+      esp_task_wdt_delete(NULL);
+      esp_task_wdt_deinit();
+#endif
       sendMeta();
       last_rssi = -1;
       last_state = -1;
     } else {
+#ifdef ARDUINO_ARCH_ESP32
+      esp_task_wdt_reset();
+#endif
       retry_failed_count++;
       Serial.print(" failed, rc=");//连接失败
       Serial.print(client.state());//重新连接
@@ -1237,7 +1232,36 @@ void reconnect() {//等待，直到连接上服务器
 int buflen = 0;
 void loop() {
    hasPacket = false;
-   SCR_Process();
+   if (ZC)
+   {
+        ZC = 0;
+        if (abs(zc_interval - last_zc_interval) >= 1000)
+        {
+#if DEBUG_LEVEL >= 3
+            Serial.printf("Zero Detect Interval: %d\n", zc_interval);
+#endif
+            last_zc_interval = zc_interval;
+        }
+   }
+   while (Serial.available())
+   {
+      char ch = Serial.read();
+      if (ch == 'S')
+      {
+          Serial.printf("Set pin %d to OUTPUT\n", PWM_PIN);
+          pinMode(PWM_PIN, OUTPUT);
+          digitalWrite(PWM_PIN, HIGH);
+//          updateSCRState(false);
+      } else if (ch == 'O') {
+          Serial.printf("Set pin %d to OUTPUT OPEN\n", PWM_PIN);
+          pinMode(PWM_PIN, OUTPUT);
+          digitalWrite(PWM_PIN, LOW);
+//          updateSCRState(true);
+      } else if (ch == 'R' && Serial.read() == 'r') {
+          cfg_reset();
+          ESP.restart();
+      }
+   }
     if (!bootCountReset && millis() - boot_time >= 5000)
     {
         bootCountReset = true;
@@ -1254,13 +1278,13 @@ void loop() {
    }
    if (inSmooth && last_state_hold != 0 && millis() - last_state_hold <= SMOOTH_INTERVAL && set_state != -1)
    {
-      if (WORK_MODE != 2 && WORK_MODE != 3)
+      if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
         Serial.print("Smooth: ");
       updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
    }
    if (inSmooth && millis() - last_state_hold > SMOOTH_INTERVAL && set_state != -1)
    {
-      if (WORK_MODE != 2 && WORK_MODE != 3)
+      if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
         Serial.print("Final: ");
       updatePWMValue(set_state);
       inSmooth = false;
@@ -1317,7 +1341,7 @@ void loop() {
 
    if (millis() - last_send_meta >= 60000)
    {
-      if (WORK_MODE != 2 && WORK_MODE != 3)
+      if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
           Serial.printf("PING %ld  WiFI: %d\n", millis(), WiFi.status());
       sendMeta();
    }

@@ -533,6 +533,7 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
 //      CFG_WRITE_STRING(128, password, sizeof(msg_buf) - (password - msg_buf));
 //      CFG_WRITE_STRING(160, (char *)mqtt_server, sizeof(mqtt_server));
       cfg_save(def_value);
+      cfg_confirm();
       if (telnetClient)
       {
           telnetClient.stop();
