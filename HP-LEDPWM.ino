@@ -518,17 +518,33 @@ void ICACHE_RAM_ATTR onTimerISR(){
     // 打开SCR
     else
     {
+        bool matched = false;
         if (target_scr_timerout1 != 0 && micros() >= target_scr_timerout1 && scr_current_bright != 0)
         {
+            matched = true;
             target_scr_timerout1 = 0;
             timerRunning = false;
             updateSCRState(true, PWM_PIN); // 打开SCR
+            if (micros() < target_scr_timerout2)
+            {
+                timer1_write(5 * (target_scr_timerout2 - micros()));
+            }
         }
         if (target_scr_timerout2 != 0 && micros() >= target_scr_timerout2 && scr_current_bright2 != 0)
         {
+            matched = true;
             target_scr_timerout2 = 0;
             timerRunning = false;
             updateSCRState(true, PWM_WPIN); // 打开SCR
+            if (micros() < target_scr_timerout1)
+            {
+                timer1_write(5 * (target_scr_timerout1 - micros()));
+            }
+        }
+        if (!matched)
+        {
+            // 5 MHz counting, 1 Tick = 0.2us, sleep 0.1% of duty cycle ~= 10ms / 1000 = 10us
+            timer1_write(50); // sleep 10us
         }
     }
 }
@@ -568,25 +584,32 @@ void ICACHE_RAM_ATTR ZC_detect()
                 timer1_write(5 * PWM_SCR_DELAY);
             }
         } else {
-            updateSCRState(false, PWM_PIN); // 过零触发，关闭SCR
-            if (PWM_WPIN != 0)
+            if (scr_current_bright != PWM_END)
+            {
+                updateSCRState(false, PWM_PIN); // 过零触发，关闭SCR
+            }
+            if (scr_current_bright2 != PWM_END && PWM_WPIN != 0)
             {
                 updateSCRState(false, PWM_WPIN); // 过零触发，关闭SCR
             }
-            if (scr_current_bright != 0){
+            if (scr_current_bright != 0 || scr_current_bright2 != 0){
                 timerRunning = true;
                 long tSleepus = map(scr_current_bright, PWM_START, PWM_PERIOD, zc_interval, 0);
+                long tSleepus2 = 1000000;
                 target_scr_timerout1 = micros() + tSleepus;
                 if (PWM_WPIN != 0){
-                    long tSleepus2 = map(scr_current_bright2, PWM_START, PWM_PERIOD, zc_interval, 0);
+                    tSleepus2 = map(scr_current_bright2, PWM_START, PWM_PERIOD, zc_interval, 0);
                     target_scr_timerout2 = micros() + tSleepus2;
+                } else {
+                    target_scr_timerout2 = 1000000;
                 }
-//                long tSleepus = map(scr_current_bright, PWM_START, PWM_PERIOD, 5 * zc_interval, 0);
+                //timer1_write(tSleepus > tSleepus2 && tSleepus2 != -1 ? tSleepus2 * 5 : tSleepus * 5);
+//                long tSleepTick = map(scr_current_bright, PWM_START, PWM_PERIOD, 5 * zc_interval, 0);
+                timer1_write(min(tSleepus, tSleepus2) * 5);
     #if DEBUG_LEVEL >= 5
-                Serial.printf("T: %d\n", tSleepus);
+                Serial.printf("T: %d %d\n", tSleepus, tSleepus2);
     #endif
     //(zc_interval - (float(scr_current_bright) / PWM_PERIOD * zc_interval)
-//                timer1_write(tSleepus);
             }
         }
     }
@@ -649,12 +672,12 @@ void inline enableInterrupts()
               }
               timer = timerBegin(0, getApbFrequency() / 5000000, true); // timer_id = 0; divider=80; countUp = true;
               timerAttachInterrupt(timer, &onTimerISR, true);
-              if (PWM_SCR_DELAY != 0)
-              {
+//              if (PWM_SCR_DELAY != 0)
+//              {
                   timerAlarmWrite(timer, 5000000, false); // Run by manual tick
-              } else {
-                  timerAlarmWrite(timer, 1250, true);  // Run by auto tick with 800 Hz
-              }
+//              } else {
+//                  timerAlarmWrite(timer, 1250, true);  // Run by auto tick with 2000 Hz
+//              }
               timerAlarmEnable(timer);
 #endif
           }
@@ -712,7 +735,8 @@ void setup() {
           Serial.printf("Auto Initalize by PCB Board - SCR Version\n");
           WORK_MODE = 4;
           PWM_PIN = 4;
-          PWM_WPIN = 0;
+          PWM_WPIN = 16;
+          CH2_MODE = 1;
           EN_PORT_CH1 = 0;
           EN_PORT_CH2 = 0;
           PWM_SCR_TRIGGER = 5;
