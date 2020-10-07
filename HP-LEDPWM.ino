@@ -79,6 +79,7 @@ bool ignoreOutput = false;
 
 // Current Bright in PWM Range (正比)
 int scr_current_bright = 0;
+int scr_current_bright2 = 0;
 
 uint16_t set_ct = 4000;
 uint8_t  set_state = 0;
@@ -116,8 +117,8 @@ const hp_cfg_t def_cfg[] = {
   {68, sizeof(uint16_t), (uint16_t)200,   &PWM_END, false},         // UINT16: PWM END
   {70, sizeof(uint16_t), (uint16_t)4100,  &set_ct, false},          // UINT16: COLOR TEMPERATURE / BRIGHT 2
   {72, sizeof(uint16_t), (uint16_t)200,   &PWM_PERIOD, false},      // UINT16: PWM PERIOD
-  {74, sizeof(uint8_t), (uint8_t)0,   &PWM_PIN, false},             // UINT8:  PWM_PIN
-  {75, sizeof(uint8_t), (uint8_t)0,   &PWM_WPIN, false},            // UINT8:  PWM_WPIN
+  {74, sizeof(uint8_t), (uint8_t)0,   &PWM_PIN, false},             // UINT8:  PWM_PIN    Single-CH / Warm LED PIN
+  {75, sizeof(uint8_t), (uint8_t)0,   &PWM_WPIN, false},            // UINT8:  PWM_WPIN   White LED PIN
   {76, sizeof(uint8_t), (uint8_t)1,   &WORK_MODE, false},           // UINT8:  MODE   0 NON-INVERT  1 INVERT  2 SCR NON-INVERT  3 SCR INVERT
   {77, sizeof(uint8_t), (uint8_t)0,   &PWM_SCR_TRIGGER, false},     // UINT8:  SCR MODE ZeroDetect Pin
   {78, sizeof(int16_t), (int16_t)0,   &PWM_SCR_DELAY, false},       // UINT16: SCR MODE ZeroDetect DELAY
@@ -139,6 +140,7 @@ const hp_cfg_t def_cfg[] = {
 };
 
 #define STARTUP_SMOOTH_EXECUTE updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL), CH2_MODE == 0 ? set_ct : (last_set_ct - (float)(last_set_ct - set_ct) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL));
+#define isScrMode (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -217,7 +219,7 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
     {
         bits--;
     }
-    if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
+    if (isScrMode)
     {
         pinMode(pwm_pin, OUTPUT);
         digitalWrite(pwm_pin, HIGH);
@@ -289,7 +291,7 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
         // Commit
         pwm_start(); 
         digitalWrite(pwm_pin, isChannelInvert(pwm_pin) ? PWM_PERIOD : 0);
-    } else if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
+    } else if (isScrMode)
     {
         digitalWrite(pwm_pin, isChannelInvert(pwm_pin) ? LOW : HIGH);
     }
@@ -298,7 +300,7 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
 
 void pwmWrite(uint8_t pwm_pin, int32_t duty)
 {
-    if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4) return;
+    if (isScrMode) return;
 #ifdef ARDUINO_ARCH_ESP32
     if (pwm_pin == 101)
     {
@@ -352,8 +354,8 @@ void updatePWMValue(float set_state, float set_ct)
     if (pwm_state == PWM_END && PWM_AUTO_FULL_POWER) pwm_state = PWM_PERIOD;
     if (PWM_WPIN != 0)
     {
-        float cold_power = set_state / 100.;
-        float warm_power = 0;
+        float warm_power = set_state / 100.;
+        float cold_power = 0;
 
         if (CH2_MODE == 0)
         {
@@ -374,7 +376,7 @@ void updatePWMValue(float set_state, float set_ct)
         } else 
         {
             pwm_state = PWM_END;
-            warm_power = set_ct / 100.;
+            cold_power = set_ct / 100.;
         }
         
     #if DEBUG_LEVEL >= 2
@@ -413,8 +415,15 @@ void updatePWMValue(float set_state, float set_ct)
             }
         }
 
-        pwmWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? PWM_PERIOD - pwm_state * warm_power : pwm_state * warm_power);
-        pwmWrite(PWM_WPIN, isChannelInvert(PWM_WPIN) ? PWM_PERIOD - pwm_state * cold_power : pwm_state * cold_power);
+        if (!isScrMode)
+        {
+            pwmWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? PWM_PERIOD - pwm_state * warm_power : pwm_state * warm_power);
+            pwmWrite(PWM_WPIN, isChannelInvert(PWM_WPIN) ? PWM_PERIOD - pwm_state * cold_power : pwm_state * cold_power);
+        } else 
+        {
+            scr_current_bright = pwm_state * warm_power;
+            scr_current_bright2 = pwm_state * cold_power;            
+        }
     } else {
         if (EN_PORT_CH1 != 0)
         {
@@ -428,7 +437,7 @@ void updatePWMValue(float set_state, float set_ct)
             }
         }
         
-        if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
+        if (!isScrMode)
         {
             pwmWrite(PWM_PIN, isChannelInvert(PWM_PIN) ? PWM_PERIOD - pwm_state : pwm_state);       
         } else 
@@ -436,7 +445,7 @@ void updatePWMValue(float set_state, float set_ct)
             scr_current_bright = pwm_state;
         }
         #if DEBUG_LEVEL >= 2
-        if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4 && !ignoreOutput)
+        if (!isScrMode && !ignoreOutput)
             Serial.printf("Set Power Power %f  => %d\n", set_state, pwm_state);
         #endif
     }
@@ -453,7 +462,7 @@ uint32_t lastZC_id = 0;
 bool timerRunning = false;
 bool scrState = 0;
 
-inline void updateSCRState(bool state)
+inline void updateSCRState(bool state, int pin)
 {
     scrState = state;
     if (state == false)
@@ -463,7 +472,7 @@ inline void updateSCRState(bool state)
 #endif
 //        if (scr_current_bright != PWM_PERIOD)
         {
-            digitalWrite(PWM_PIN, HIGH);
+            digitalWrite(pin, HIGH);
         }
     } else 
     {
@@ -471,9 +480,12 @@ inline void updateSCRState(bool state)
         Serial.printf("O %ld\n", micros());
 #endif
         // 打开SCR
-        digitalWrite(PWM_PIN, LOW);
+        digitalWrite(pin, LOW);
     }
 }
+
+uint32_t target_scr_timerout1 = 0;
+uint32_t target_scr_timerout2 = 0;
 
 void ICACHE_RAM_ATTR onTimerISR(){
     if (PWM_SCR_DELAY != 0)
@@ -489,7 +501,7 @@ void ICACHE_RAM_ATTR onTimerISR(){
               // 新过零触发，旧触发开启中
               if (scr_current_bright != PWM_PERIOD)
               {
-                  updateSCRState(false); // 过零触发，关闭SCR
+                  updateSCRState(false, PWM_PIN); // 过零触发，关闭SCR
                   timer1_write(5 * (zc_interval - on_time + ((int32_t)PWM_SCR_DELAY - (int32_t)zc_cycle)));
 //                  Serial.printf("w %d %d\n", zc_interval - on_time + ((int32_t)(PWM_SCR_DELAY - (int32_t)zc_cycle)), on_time);
               } else {
@@ -498,20 +510,25 @@ void ICACHE_RAM_ATTR onTimerISR(){
           } else if (scr_current_bright != 0)
           {
               lastZC_id = ZC_id + 1;
-              updateSCRState(true); // 打开SCR
+              updateSCRState(true, PWM_PIN); // 打开SCR
               justZeroCrossing = 1;
               timer1_write(5 * (on_time));
           }
     }
     // 打开SCR
-    else if (scr_current_bright != 0)
+    else
     {
-        timerRunning = false;
-        updateSCRState(true); // 打开SCR
-        if (PWM_SCR_DELAY != 0 && ZC && !justZeroCrossing)
+        if (target_scr_timerout1 != 0 && micros() >= target_scr_timerout1 && scr_current_bright != 0)
         {
-            timer1_write(5 * PWM_SCR_DELAY);
-            justZeroCrossing = 1;
+            target_scr_timerout1 = 0;
+            timerRunning = false;
+            updateSCRState(true, PWM_PIN); // 打开SCR
+        }
+        if (target_scr_timerout2 != 0 && micros() >= target_scr_timerout2 && scr_current_bright2 != 0)
+        {
+            target_scr_timerout2 = 0;
+            timerRunning = false;
+            updateSCRState(true, PWM_WPIN); // 打开SCR
         }
     }
 }
@@ -542,7 +559,7 @@ void ICACHE_RAM_ATTR ZC_detect()
         {
             if (scr_current_bright == PWM_PERIOD)
             {
-                updateSCRState(true); // 过零触发，关闭SCR
+                updateSCRState(true, PWM_PIN); // 过零触发，关闭SCR
             } else if (!timerRunning)
             {
                 justZeroCrossing = 1;
@@ -551,15 +568,25 @@ void ICACHE_RAM_ATTR ZC_detect()
                 timer1_write(5 * PWM_SCR_DELAY);
             }
         } else {
-            updateSCRState(false); // 过零触发，关闭SCR
+            updateSCRState(false, PWM_PIN); // 过零触发，关闭SCR
+            if (PWM_WPIN != 0)
+            {
+                updateSCRState(false, PWM_WPIN); // 过零触发，关闭SCR
+            }
             if (scr_current_bright != 0){
                 timerRunning = true;
-                long tSleepus = map(scr_current_bright, PWM_START, PWM_PERIOD, 5 * zc_interval, 0);
+                long tSleepus = map(scr_current_bright, PWM_START, PWM_PERIOD, zc_interval, 0);
+                target_scr_timerout1 = micros() + tSleepus;
+                if (PWM_WPIN != 0){
+                    long tSleepus2 = map(scr_current_bright2, PWM_START, PWM_PERIOD, zc_interval, 0);
+                    target_scr_timerout2 = micros() + tSleepus2;
+                }
+//                long tSleepus = map(scr_current_bright, PWM_START, PWM_PERIOD, 5 * zc_interval, 0);
     #if DEBUG_LEVEL >= 5
                 Serial.printf("T: %d\n", tSleepus);
     #endif
     //(zc_interval - (float(scr_current_bright) / PWM_PERIOD * zc_interval)
-                timer1_write(tSleepus);
+//                timer1_write(tSleepus);
             }
         }
     }
@@ -611,7 +638,6 @@ void inline enableInterrupts()
 //      if (IN_STARTUP)
       {
           if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4) {
-              //Initialize Ticker every 0.5s
 #if ARDUINO_ARCH_ESP8266
               timer1_disable();
               timer1_attachInterrupt(onTimerISR);
@@ -623,9 +649,13 @@ void inline enableInterrupts()
               }
               timer = timerBegin(0, getApbFrequency() / 5000000, true); // timer_id = 0; divider=80; countUp = true;
               timerAttachInterrupt(timer, &onTimerISR, true);
-              timerAlarmWrite(timer, 5000000, false);
+              if (PWM_SCR_DELAY != 0)
+              {
+                  timerAlarmWrite(timer, 5000000, false); // Run by manual tick
+              } else {
+                  timerAlarmWrite(timer, 1250, true);  // Run by auto tick with 800 Hz
+              }
               timerAlarmEnable(timer);
-//              timerAlarmEnable(timer);
 #endif
           }
       }
@@ -1212,7 +1242,7 @@ void sendMeta()
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"%s\"", dev_name);
     p = p + sprintf(p, ",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d,\"en1\":%d,\"en2\":%d,\"adc\":%d,\"ch2mode\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD, EN_PORT_CH1, EN_PORT_CH2, BRIGHT_ADC_PIN, CH2_MODE);
     client.publish("dev", msg_buf);
-    if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
+    if (isScrMode)
     {
         p = msg_buf + sprintf(msg_buf, "{\"scr_delay\":%d,\"trigger_pin\":%d}", PWM_SCR_DELAY, PWM_SCR_TRIGGER);
         client.publish("dev", msg_buf);        
@@ -1327,13 +1357,13 @@ void loop() {
    }
    if (inSmooth && last_state_hold != 0 && millis() - last_state_hold <= SMOOTH_INTERVAL && set_state != -1)
    {
-      if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
+      if (!isScrMode)
         Serial.print("Smooth: ");
       updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL), (last_set_ct - (float)(last_set_ct - set_ct) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
    }
    if (inSmooth && millis() - last_state_hold > SMOOTH_INTERVAL && set_state != -1)
    {
-      if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
+      if (!isScrMode)
         Serial.print("Final: ");
       updatePWMValue(set_state, set_ct);
       inSmooth = false;
@@ -1396,7 +1426,7 @@ void loop() {
 
    if (millis() - last_send_meta >= 60000)
    {
-      if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
+      if (!isScrMode)
           Serial.printf("PING %ld  WiFI: %d\n", millis(), WiFi.status());
       sendMeta();
    }
