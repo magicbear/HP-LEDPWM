@@ -40,7 +40,7 @@ uint8_t  PWM_AUTO_FULL_POWER = 1;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.29"
+#define _VERSION "2.30"
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
@@ -83,6 +83,7 @@ int scr_current_bright = 0;
 uint16_t set_ct = 4000;
 uint8_t  set_state = 0;
 uint8_t  inTrigger = 0;
+uint8_t  CH2_MODE = 0;
 
 uint32_t zc_interval = 0;
 uint32_t zc_last = 0;
@@ -129,12 +130,15 @@ const hp_cfg_t def_cfg[] = {
   {87, sizeof(uint8_t), (uint8_t)0,   &PWM_SOURCE_DUTY, false},             // UINT8:  PWM_SOURCE
   {88, sizeof(uint8_t), (uint8_t)0,   &BRIGHT_ADC_PIN, false},             // UINT8:  BRIGHT_ADC_PIN
   {89, sizeof(uint8_t), (uint8_t)0,   &AUTO_SAVE_DISABLED, false},             // UINT8:  BRIGHT_ADC_PIN
+  {90, sizeof(uint8_t), (uint8_t)0,   &CH2_MODE, false},             // UINT8:  CH2_MODE
   {96, 0, (uint8_t)0, &ssid, true},                    // STRING: SSID
   {128, 0, (uint8_t)0, &password, true},                   // STRING: WIFI PASSWORD 
   {160, 0, (uint8_t)0, &mqtt_server, true},        // STRING: MQTT SERVER
   {192, sizeof(uint16_t), (uint16_t)1234, &port, true},             // UINT16: PORT
   {NULL, 0,0, NULL, false}
 };
+
+#define STARTUP_SMOOTH_EXECUTE updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL), CH2_MODE == 0 ? set_ct : (last_set_ct - (float)(last_set_ct - set_ct) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL));
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -341,39 +345,48 @@ float mapfloat(float x, long in_min, long in_max, long out_min, long out_max)
  return (float)(x - in_min) * (out_max - out_min) / (float)(in_max - in_min) + out_min;
 }
 
-void updatePWMValue(float set_state)
+void updatePWMValue(float set_state, float set_ct)
 {
     int pwm_state = mapfloat(set_state, 0, 100, PWM_START, PWM_END);
     if (pwm_state == PWM_START) pwm_state = 0;
     if (pwm_state == PWM_END && PWM_AUTO_FULL_POWER) pwm_state = PWM_PERIOD;
     if (PWM_WPIN != 0)
     {
-        float set_power = 0.5 + (set_ct - 4100) / 3000.;
-        if (inSmooth)
-        {
-            if (millis() - last_state_hold < SMOOTH_INTERVAL)
-            {
-                set_power = 0.5 + ((last_set_ct - (float)(last_set_ct - set_ct) * (millis() - last_state_hold) / SMOOTH_INTERVAL) - 4100) / 3000.;
-            }            
-        }
-    
-        float warm_power = 1-set_power;
-        float cold_power = set_power;
-    
-        if (set_power > 0 && set_power < 0.5)
-        {
-            warm_power = 1;
-            cold_power = set_power / (1-set_power);
-        } else if (set_power >= 0.5 && set_power < 1)
-        {
-            warm_power = (1-set_power) / set_power;
-            cold_power = 1;
-        }
+        float cold_power = set_state / 100.;
+        float warm_power = 0;
 
+        if (CH2_MODE == 0)
+        {
+            float set_power = 0.5 + (set_ct - 4100) / 3000.;
+            
+            warm_power = 1-set_power;
+            cold_power = set_power;
+            
+            if (set_power > 0 && set_power < 0.5)
+            {
+                warm_power = 1;
+                cold_power = set_power / (1-set_power);
+            } else if (set_power >= 0.5 && set_power < 1)
+            {
+                warm_power = (1-set_power) / set_power;
+                cold_power = 1;
+            }
+        } else 
+        {
+            pwm_state = PWM_END;
+            warm_power = set_ct / 100.;
+        }
+        
     #if DEBUG_LEVEL >= 2
         if (!ignoreOutput)
         {
-            Serial.printf("Set Power %f PWM = %d  CT: %d WARM: %d%% %d  COLD: %d%% %d\n", set_state, pwm_state, set_ct, (int)(warm_power * 100), (int)(pwm_state * warm_power), (int)(cold_power * 100), (int)(pwm_state * cold_power));
+            if (CH2_MODE == 0)
+            {
+                Serial.printf("Set Power %f PWM = %d  CT: %f  COLD: %d%% %d WARM: %d%% %d\n", set_state, pwm_state, set_ct, (int)(cold_power * 100), (int)(pwm_state * cold_power), (int)(warm_power * 100), (int)(pwm_state * warm_power));
+            } else 
+            {
+                Serial.printf("Set Power CH1 = %f PWM = %d  CH2: %f   CH1(COLD): %d%% %d   CH2(WARM): %d%% %d\n", set_state, pwm_state, set_ct, (int)(cold_power * 100), (int)(pwm_state * cold_power), (int)(warm_power * 100), (int)(pwm_state * warm_power));
+            }
         }
     #endif
     
@@ -722,7 +735,7 @@ void setup() {
       analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_SOURCE);
   }
   ignoreOutput = true;
-  updatePWMValue(0);
+  updatePWMValue(0, CH2_MODE == 0 ? set_ct : 0);
   uint32_t last_state_hold = 0;
 #ifdef ARDUINO_ARCH_ESP8266
   if ((resetInfo->reason == REASON_DEFAULT_RST || resetInfo->reason == REASON_EXT_SYS_RST) && strlen(ssid) != 0)
@@ -736,6 +749,7 @@ void setup() {
   {
       last_state_hold = millis();
       last_set_state = 0;
+      if (CH2_MODE == 1) last_set_ct = 0;
       boot_count = boot_count_increase();
   }
 #ifdef ARDUINO_ARCH_ESP8266
@@ -744,7 +758,7 @@ void setup() {
   {
       while (last_state_hold != 0  && millis() - last_state_hold < STARTUP_SMOOTH_INTERVAL)
       {
-          updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL));
+          STARTUP_SMOOTH_EXECUTE;
           yield();
       }
   }
@@ -796,9 +810,9 @@ void setup() {
   startupWifiConfigure(def_cfg, msg_buf, sizeof(msg_buf), mqtt_cls);
 
 #ifdef ARDUINO_ARCH_ESP8266
-  updatePWMValue(set_state);
+  updatePWMValue(set_state, set_ct);
 #elif ARDUINO_ARCH_ESP32
-  updatePWMValue(set_state);
+  updatePWMValue(set_state, set_ct);
 #endif
   
 //  ignoreOutput = true;
@@ -819,11 +833,12 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) {
     if (last_state_hold != 0 && millis() - last_state_hold < STARTUP_SMOOTH_INTERVAL)
     {
-        updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL));
+        STARTUP_SMOOTH_EXECUTE;
     } else 
     {
         last_set_state = set_state;
-        updatePWMValue(set_state);
+        last_set_ct = set_ct;
+        updatePWMValue(set_state, set_ct);
     }
     if (millis() - last_print_dot >= 200)
     {
@@ -845,7 +860,7 @@ void setup() {
   }
   while (last_state_hold != 0 && millis() - last_state_hold < STARTUP_SMOOTH_INTERVAL)
   {
-      updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL));
+      STARTUP_SMOOTH_EXECUTE;
       yield();
   }
 
@@ -906,13 +921,20 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     } else 
     {
         set_ct = atoi((char *)payload);
-        if (set_ct < 2600)
+        if (CH2_MODE == 0)
         {
-            set_ct = 2600;
-        }
-        if (set_ct > 5600)
+            if (set_ct < 2600)
+            {
+                set_ct = 2600;
+            }
+            if (set_ct > 5600)
+            {
+                set_ct = 5600;
+            }
+        } else 
         {
-            set_ct = 5600;
+            if (set_ct < 0) set_ct = 0;
+            if (set_ct > 100) set_ct = 100;
         }
     }
     
@@ -920,11 +942,11 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     {
         inSmooth = false;
         Serial.print("Ignore: ");
-        updatePWMValue(set_state);
+        updatePWMValue(set_state, set_ct);
     } else if (!inSmooth)
     {
         Serial.print("DIRECT: ");
-        updatePWMValue(set_state);
+        updatePWMValue(set_state, set_ct);
     }
     last_state_hold = millis();
     last_state = -1;
@@ -986,7 +1008,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       {
           analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_SOURCE);
       }
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       sendMeta();
   } else if (strcmp(topic, "set_pwm_start") == 0)
   {
@@ -995,7 +1017,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       PWM_START = atoi((char *)payload);
       payload[length] = bufferByte;
       CFG_SAVE();
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       sendMeta();
   } else if (strcmp(topic, "set_pwm_end") == 0)
   {
@@ -1004,7 +1026,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       PWM_END = atoi((char *)payload);
       payload[length] = bufferByte;
       CFG_SAVE();
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       sendMeta();
   } else if (strcmp(topic, "set_pwm_period") == 0)
   {
@@ -1027,7 +1049,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       {
           analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_SOURCE);
       }
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       sendMeta();
   } else if (strcmp(topic, "set_pwm_pin") == 0)
   {
@@ -1035,7 +1057,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       pwmWrite(PWM_PIN, 0);
       PWM_PIN = atoi((char *)payload);
       analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_PIN);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_pwm_wpin") == 0)
@@ -1047,8 +1069,11 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       }
       PWM_WPIN = atoi((char *)payload);
       analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_WPIN);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
+      sprintf(msg_buf, "{\"bright2\":\"unset\",\"ct\":\"unset\"}");
+      client.publish("status", msg_buf);
+      last_state = -1;
       sendMeta();
   } else if (strcmp(topic, "set_pwm_src") == 0)
   {
@@ -1059,7 +1084,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       }
       PWM_SOURCE = atoi((char *)payload);
       analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_SOURCE);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_pwm_duty") == 0)
@@ -1067,21 +1092,21 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       payload[length] = 0;
       PWM_SOURCE_DUTY = atoi((char *)payload);
       analogPinInit(PWM_FREQUENCE, PWM_PERIOD, PWM_SOURCE);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_pwm_mode") == 0)
   {
       payload[length] = 0;
       WORK_MODE = atoi((char *)payload);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_pwm_trigger") == 0)
   {
       payload[length] = 0;
       PWM_SCR_TRIGGER = atoi((char *)payload);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
       rebootSystem();
@@ -1089,7 +1114,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   {
       payload[length] = 0;
       PWM_SCR_DELAY = atoi((char *)payload);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_config_pin") == 0)
@@ -1102,37 +1127,61 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   {
       payload[length] = 0;
       EN_PORT_CH1 = atoi((char *)payload);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_en2") == 0)
   {
       payload[length] = 0;
       EN_PORT_CH2 = atoi((char *)payload);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_adc_pin") == 0)
   {
       payload[length] = 0;
       BRIGHT_ADC_PIN = atoi((char *)payload);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_auto_full_power") == 0)
   {
       payload[length] = 0;
       PWM_AUTO_FULL_POWER = atoi((char *)payload);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
       sendMeta();
   } else if (strcmp(topic, "set_autosave") == 0)
   {
       payload[length] = 0;
       AUTO_SAVE_DISABLED = atoi((char *)payload);
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       CFG_SAVE();
-      sendMeta();      
+      sendMeta();
+  } else if (strcmp(topic, "set_ch2mode") == 0)
+  {
+      payload[length] = 0;
+      CH2_MODE = atoi((char *)payload);
+      if (CH2_MODE == 1 && set_ct > 100)
+      {
+          set_ct = 100;
+      } else if (CH2_MODE == 0)
+      {
+          if (set_ct < 2600)
+          {
+              set_ct = 2600;
+          }
+          if (set_ct > 5600)
+          {
+              set_ct = 5600;
+          }
+      }
+      updatePWMValue(set_state, set_ct);
+      CFG_SAVE();
+      sprintf(msg_buf, "{\"bright2\":\"unset\",\"ct\":\"unset\"}");
+      client.publish("status", msg_buf);
+      last_state = -1;
+      sendMeta();
   } else if (strcmp(topic, "set_startup_smooth") == 0)
   {
       payload[length] = 0;
@@ -1161,7 +1210,7 @@ void sendMeta()
     last_send_meta = millis();
   // max length = 64 - 21
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"%s\"", dev_name);
-    p = p + sprintf(p, ",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d,\"en1\":%d,\"en2\":%d,\"adc\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD, EN_PORT_CH1, EN_PORT_CH2, BRIGHT_ADC_PIN);
+    p = p + sprintf(p, ",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d,\"en1\":%d,\"en2\":%d,\"adc\":%d,\"ch2mode\":%d}", PWM_FREQUENCE, PWM_START, PWM_END, PWM_PERIOD, EN_PORT_CH1, EN_PORT_CH2, BRIGHT_ADC_PIN, CH2_MODE);
     client.publish("dev", msg_buf);
     if (WORK_MODE == 2 || WORK_MODE == 3 || WORK_MODE == 4)
     {
@@ -1280,13 +1329,13 @@ void loop() {
    {
       if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
         Serial.print("Smooth: ");
-      updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
+      updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / SMOOTH_INTERVAL), (last_set_ct - (float)(last_set_ct - set_ct) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
    }
    if (inSmooth && millis() - last_state_hold > SMOOTH_INTERVAL && set_state != -1)
    {
       if (WORK_MODE != 2 && WORK_MODE != 3 && WORK_MODE != 4)
         Serial.print("Final: ");
-      updatePWMValue(set_state);
+      updatePWMValue(set_state, set_ct);
       inSmooth = false;
    }
    if (last_state_hold != 0 && set_state > 0 && !inSmooth && !inTrigger && millis() - last_state_hold >= 2000)
@@ -1316,7 +1365,13 @@ void loop() {
       last_rssi = rssi;
       if (PWM_WPIN != 0)
       {
-          sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", set_state, set_ct, rssi, VERSION, millis());
+          if (CH2_MODE == 0)
+          {
+              sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", set_state, set_ct, rssi, VERSION, millis());
+          } else 
+          {
+              sprintf(msg_buf, "{\"bright\":%d,\"bright2\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", set_state, set_ct, rssi, VERSION, millis());
+          }
       } else {
           sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", set_state, rssi, VERSION, millis());
       }
