@@ -26,6 +26,43 @@ typedef struct hp_cfg {
 /**@{*/
 /**
  * @brief      create config buffer and init storage backend
+ * 
+ * \code{c}
+ * // Example to use
+ * #define mqtt_cls "DEMO_CLASS"
+ * uint8_t bright;
+ * uint16_t port;
+ * char *ssid, *password, *mqtt_server;
+ * const hp_cfg_t def_cfg[] = {
+ *   {31, sizeof(uint8_t), (uint8_t)10,      &bright, true, "bright"},        // BRIGHT
+ *   {96, 0, (uint8_t)0, &ssid, true, "ssid"},                    // STRING: SSID
+ *   {128, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
+ *   {160, 0, (uint8_t)0, &mqtt_server, true, "mqtt_srv"},        // STRING: MQTT SERVER
+ *   {192, sizeof(uint16_t), (uint16_t)1234, &port, true, "mqtt_port"},             // UINT16: PORT
+ *   {NULL, 0,0, NULL, false, NULL}
+ * };
+ * void setup() {
+ *    cfg_begin();
+ *    bool cfg_ok = cfg_check(mqtt_cls, def_cfg);
+ *    if (!cfg_load(def_cfg))
+ *    {
+ *        cfg_init(mqtt_cls, def_cfg, true);
+ *    }
+ *    if (!cfg_ok)
+ *    {
+ *        // write your auto init code here
+ *        // such as PCB version auto check
+ *    }
+ *    
+ *    // update value and save
+ *    bright = 100;
+ *    cfg_save(def_cfg);
+ *    cfg_confirm();
+ *    
+ *    // clear all configure
+ *    cfg_reset();
+ * }
+ * \endcode
  *
  */
 void cfg_begin();
