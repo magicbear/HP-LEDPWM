@@ -100,43 +100,41 @@ char msg_buf[160];
 uint8_t BRIGHT_ADC_PIN = 0;
 
 #ifdef ARDUINO_ARCH_ESP32
-uint16_t OLD_PWM_FREQ = 0;
 hw_timer_t * timer = NULL;
 #endif
 
 const hp_cfg_t def_cfg[] = {
-  {31, sizeof(uint8_t), (uint8_t)10,      &set_state, true},        // BRIGHT
-  {32, 0, (uint8_t)0, &dev_name, true},                    // NAME LENGTH
+  {31, sizeof(uint8_t), (uint8_t)10,      &set_state, true, "bright"},        // BRIGHT
+  {32, 0, (uint8_t)0, &dev_name, true, "name"},                    // NAME LENGTH
 #ifdef ARDUINO_ARCH_ESP32
-  {60, sizeof(uint32_t), (uint32_t)20000, &PWM_FREQUENCE, false},   // UINT16: PWM FREQUENCE
-  {64, sizeof(uint16_t), (uint16_t)0, &OLD_PWM_FREQ, false},   // UINT16: PWM FREQUENCE
+  {60, sizeof(uint32_t), (uint32_t)20000, &PWM_FREQUENCE, false, "pwm_freq"},   // UINT32: PWM FREQUENCE
 #else
   {64, sizeof(uint16_t), (uint16_t)20000, &PWM_FREQUENCE, false},   // UINT16: PWM FREQUENCE
 #endif
-  {66, sizeof(uint16_t), (uint16_t)0,     &PWM_START, false},       // UINT16: PWM START
-  {68, sizeof(uint16_t), (uint16_t)200,   &PWM_END, false},         // UINT16: PWM END
-  {70, sizeof(uint16_t), (uint16_t)4100,  &set_ct, false},          // UINT16: COLOR TEMPERATURE / BRIGHT 2
-  {72, sizeof(uint16_t), (uint16_t)200,   &PWM_PERIOD, false},      // UINT16: PWM PERIOD
-  {74, sizeof(uint8_t), (uint8_t)0,   &PWM_PIN, false},             // UINT8:  PWM_PIN    Single-CH / Warm LED PIN
-  {75, sizeof(uint8_t), (uint8_t)0,   &PWM_WPIN, false},            // UINT8:  PWM_WPIN   White LED PIN
-  {76, sizeof(uint8_t), (uint8_t)1,   &WORK_MODE, false},           // UINT8:  MODE   0 NON-INVERT  1 INVERT  2 SCR NON-INVERT  3 SCR INVERT
-  {77, sizeof(uint8_t), (uint8_t)0,   &PWM_SCR_TRIGGER, false},     // UINT8:  SCR MODE ZeroDetect Pin
-  {78, sizeof(int16_t), (int16_t)0,   &PWM_SCR_DELAY, false},       // UINT16: SCR MODE ZeroDetect DELAY
-  {80, sizeof(uint8_t), (uint8_t)0,   &CFG_RESET_PIN, false},       // UINT8:  RESET PIN
-  {81, sizeof(uint8_t), (uint8_t)0,   &EN_PORT_CH1, false},             // UINT8:  EN PIN
-  {82, sizeof(uint8_t), (uint8_t)1,   &PWM_AUTO_FULL_POWER, false}, // UINT8:  AUTO FULL POWER
-  {83, sizeof(uint8_t), (uint8_t)0,   &EN_PORT_CH2, false},             // UINT8:  EN PIN
-  {84, sizeof(uint16_t), (uint16_t)500, &STARTUP_SMOOTH_INTERVAL, true},    // UINT16: STARTUP SMOOTH INTERVAL
-  {86, sizeof(uint8_t), (uint8_t)0,   &PWM_SOURCE, false},             // UINT8:  PWM_SOURCE
-  {87, sizeof(uint8_t), (uint8_t)0,   &PWM_SOURCE_DUTY, false},             // UINT8:  PWM_SOURCE
-  {88, sizeof(uint8_t), (uint8_t)0,   &BRIGHT_ADC_PIN, false},             // UINT8:  BRIGHT_ADC_PIN
-  {89, sizeof(uint8_t), (uint8_t)0,   &AUTO_SAVE_DISABLED, false},             // UINT8:  BRIGHT_ADC_PIN
-  {90, sizeof(uint8_t), (uint8_t)0,   &CH2_MODE, false},             // UINT8:  CH2_MODE
-  {96, 0, (uint8_t)0, &ssid, true},                    // STRING: SSID
-  {128, 0, (uint8_t)0, &password, true},                   // STRING: WIFI PASSWORD 
-  {160, 0, (uint8_t)0, &mqtt_server, true},        // STRING: MQTT SERVER
-  {192, sizeof(uint16_t), (uint16_t)1234, &port, true},             // UINT16: PORT
-  {NULL, 0,0, NULL, false}
+  {66, sizeof(uint16_t), (uint16_t)0,     &PWM_START, false, "pwm_start"},       // UINT16: PWM START
+  {68, sizeof(uint16_t), (uint16_t)200,   &PWM_END, false, "pwm_end"},         // UINT16: PWM END
+  {70, sizeof(uint16_t), (uint16_t)4100,  &set_ct, false, "ct_abx"},          // UINT16: COLOR TEMPERATURE / BRIGHT 2
+  {72, sizeof(uint16_t), (uint16_t)200,   &PWM_PERIOD, false, "pwm_period"},      // UINT16: PWM PERIOD
+  {74, sizeof(uint8_t), (uint8_t)0,   &PWM_PIN, false, "pin_ch1"},             // UINT8:  PWM_PIN    Single-CH / Warm LED PIN
+  {75, sizeof(uint8_t), (uint8_t)0,   &PWM_WPIN, false, "pin_ch2"},            // UINT8:  PWM_WPIN   White LED PIN
+  {76, sizeof(uint8_t), (uint8_t)1,   &WORK_MODE, false, "mode"},           // UINT8:  MODE   0 NON-INVERT  1 INVERT  2 SCR NON-INVERT  3 SCR INVERT
+  {77, sizeof(uint8_t), (uint8_t)0,   &PWM_SCR_TRIGGER, false, "pin_scr_trig"},     // UINT8:  SCR MODE ZeroDetect Pin
+  {78, sizeof(int16_t), (int16_t)0,   &PWM_SCR_DELAY, false, "scr_delay"},       // UINT16: SCR MODE ZeroDetect DELAY
+  {80, sizeof(uint8_t), (uint8_t)0,   &CFG_RESET_PIN, false, "cfg_reset"},       // UINT8:  RESET PIN
+  {81, sizeof(uint8_t), (uint8_t)0,   &EN_PORT_CH1, false, "pin_en1"},             // UINT8:  EN PIN
+  {82, sizeof(uint8_t), (uint8_t)1,   &PWM_AUTO_FULL_POWER, false, "auto_fp"}, // UINT8:  AUTO FULL POWER
+  {83, sizeof(uint8_t), (uint8_t)0,   &EN_PORT_CH2, false, "pin_en2"},             // UINT8:  EN PIN
+  {84, sizeof(uint16_t), (uint16_t)500, &STARTUP_SMOOTH_INTERVAL, true, "startup_smooth"},    // UINT16: STARTUP SMOOTH INTERVAL
+  {86, sizeof(uint8_t), (uint8_t)0,   &PWM_SOURCE, false, "pwm_src"},             // UINT8:  PWM_SOURCE
+  {87, sizeof(uint8_t), (uint8_t)0,   &PWM_SOURCE_DUTY, false, "pwm_src_duty"},             // UINT8:  PWM_SOURCE
+  {88, sizeof(uint8_t), (uint8_t)0,   &BRIGHT_ADC_PIN, false, "pin_adc_bright"},             // UINT8:  BRIGHT_ADC_PIN
+  {89, sizeof(uint8_t), (uint8_t)0,   &AUTO_SAVE_DISABLED, false, "b_autosave"},             // UINT8:  AUTO_SAVE_DISABLED
+  {90, sizeof(uint8_t), (uint8_t)0,   &CH2_MODE, false, "ch2_mode"},             // UINT8:  CH2_MODE
+  {96, 0, (uint8_t)0, &ssid, true, "ssid"},                    // STRING: SSID
+  {128, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
+  {160, 0, (uint8_t)0, &mqtt_server, true, "mqtt_srv"},        // STRING: MQTT SERVER
+  {192, sizeof(uint16_t), (uint16_t)1234, &port, true, "mqtt_port"},             // UINT16: PORT
+  {NULL, 0,0, NULL, false, NULL}
 };
 
 #define STARTUP_SMOOTH_EXECUTE updatePWMValue((last_set_state - (float)(last_set_state - set_state) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL), CH2_MODE == 0 ? set_ct : (last_set_ct - (float)(last_set_ct - set_ct) * (millis() - last_state_hold) / STARTUP_SMOOTH_INTERVAL));
@@ -848,7 +846,7 @@ void setup() {
 //  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
 
   Serial.printf("\n");
-  Serial.printf("CONFIG SRC: %s\n", cfg_spiffs() ? "SPIFFS" : "EEPROM");
+  Serial.printf("CONFIG SRC: %s\n", cfg_get_backend());
   Serial.printf("Boot Count: %d\n", boot_count);
 #ifdef ARDUINO_ARCH_ESP8266
   Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
@@ -898,6 +896,14 @@ void setup() {
     {
         Serial.print(".");
         last_print_dot = millis();
+    }
+    while (Serial.available())
+    {
+      char ch = Serial.read();
+      if (ch == 'R' && Serial.read() == 'r') {
+          cfg_reset(def_cfg);
+          ESP.restart();
+      }
     }
     if (millis() >= 60000)
     {
@@ -1246,7 +1252,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   {
       if (length > 0 && payload[0] == '1')
       {
-          cfg_reset();
+          cfg_reset(def_cfg);
       } else
       {
           CFG_INIT(false);
@@ -1319,6 +1325,7 @@ void reconnect() {//等待，直到连接上服务器
       Serial.print(" failed, rc=");//连接失败
       Serial.print(client.state());//重新连接
       Serial.printf(" try again in 1 seconds\n");//延时5秒后重新连接
+      client.disconnect();
       delay(1000);
       if (retry_failed_count >= 10)
       {
@@ -1361,7 +1368,7 @@ void loop() {
           digitalWrite(PWM_PIN, LOW);
 //          updateSCRState(true);
       } else if (ch == 'R' && Serial.read() == 'r') {
-          cfg_reset();
+          cfg_reset(def_cfg);
           ESP.restart();
       }
    }
@@ -1399,7 +1406,7 @@ void loop() {
         uint32_t t1 = micros();
         uint32_t usages = 0;
         disableInterrupts();
-        CFG_SAFE_SAVE();
+        cfg_save(def_cfg, true);
         enableInterrupts();
         yield();
         usages += micros() - t1;
