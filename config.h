@@ -11,35 +11,131 @@ extern char *mqtt_server;//服务器的地址
 extern uint16_t port;//服务器端口号 
 
 typedef struct hp_cfg {
-    int offset;
-    int size;
+    int offset;  /*!< offset for config buffer */
+    int size;    /*!< offset for config variable size (1: uint8, 2:uint16, 4: uint32, 0: string, other: blob) */
     union {
       uint32_t uint32;
       uint16_t uint16;
       uint8_t  uint8;
-    } data;
-    void *assign;
-    bool full_init;
-    const char *nvs_name;
+    } data;    /*!< default value */
+    void *assign;    /*!< pointer to data */
+    bool full_init;    /*!< init when cfg_init with full_init = false */
+    const char *nvs_name;    /*!< NVS storage engine key name */
 } hp_cfg_t;
 
+/**@{*/
+/**
+ * @brief      create config buffer and init storage backend
+ *
+ */
 void cfg_begin();
+
+/**@{*/
+/**
+ * @brief      check storage backend is SPIFFS
+ *
+ * @return
+ *             - true if the backend is using SPIFFS
+ *             - false if the backend is another
+ */
 bool cfg_spiffs();
+
+/**@{*/
+/**
+ * @brief      get storage backend
+ *
+ * @return
+ *             - string for the backend using
+ */
 const char *cfg_get_backend();
+
+/**@{*/
+/**
+ * @brief      check the config in storages is valid
+ *
+ *
+ * @param[in]  mqtt_cls    class name for configs (use to check the conf).
+ * @param[in]  hp_cfg_t    configure variables
+ *                         
+ * @return
+ *             - true if config is valid
+ *             - false if config is invalid
+ */
 bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value);
+
+/**@{*/
+/**
+ * @brief      initalize the config to default value
+ *
+ *
+ * @param[in]  mqtt_cls    class name for configs (use to check the conf).
+ * @param[in]  hp_cfg_t    configure variables
+ * @param[in]  full_init   initalize all variable, if false will only init the 
+ *                         full_init == true variables
+ */
 void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init);
+
+/**@{*/
+/**
+ * @brief      clear config
+ *
+ *
+ * @param[in]  hp_cfg_t    configure variables
+ */
+void cfg_reset(const hp_cfg_t *def_value);
+
+/**@{*/
+/**
+ * @brief      load config to configure variables
+ *
+ *
+ * @param[in]  hp_cfg_t    configure variables
+ *                         
+ * @return
+ *             - true if config is valid
+ *             - false if config is invalid
+ */
+bool cfg_load(const hp_cfg_t *def_value);
+
+/**@{*/
+/**
+ * @brief      save configure variables to buffer
+ *
+ *
+ * @param[in]  hp_cfg_t      configure variables
+ * @param[in]  ignoreString  ignore check string to increase speed on NVS
+ */
+void cfg_save(const hp_cfg_t *def_value, bool ignoreString = false);
+
+/**@{*/
+/**
+ * @brief      write buffer to storage backend
+ *
+ */
+void cfg_confirm();
+
+/**@{*/
+/**
+ * @brief      setup wifi configure tools
+ * 
+ * This function will startup a WiFi Telnet server to wait telnet conn and
+ * waiting Serial console to input WiFi configure and MQTT server.
+ * 
+ * @param[in]  hp_cfg_t      configure variables
+ * @param[in]  msg_buf       buffer for temporarily save inputs.
+ * @param[in]  msg_buf_size  buffer size
+ * @param[in]  mqtt_cls    class name for configs (use to check the conf).
+ *
+ */
+void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_buf_size,  char *mqtt_cls);
+
 uint8_t cfg_read_uint8(const hp_cfg_t *def_value, int index);
 uint16_t cfg_read_uint16(const hp_cfg_t *def_value, int index);
 uint32_t cfg_read_uint32(const hp_cfg_t *def_value, int index);
-bool cfg_load(const hp_cfg_t *def_value);
-void cfg_save(const hp_cfg_t *def_value, bool ignoreString = false);
-void cfg_confirm();
 int cfg_read_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize);
 int cfg_write_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize);
-void cfg_reset(const hp_cfg_t *def_value);
 uint16_t boot_count_increase();
 void boot_count_reset();
-void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_buf_size,  char *mqtt_cls);
 
 #define CFG_CHECK() cfg_check(mqtt_cls, def_cfg)
 #define CFG_INIT(FULL_INIT) cfg_init(mqtt_cls, def_cfg, FULL_INIT)
