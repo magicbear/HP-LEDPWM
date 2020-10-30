@@ -27,7 +27,7 @@ uint16_t port;//服务器端口号
 
 #ifdef ARDUINO_ARCH_ESP32
 nvs_handle nvs;
-void cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
+bool cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
 {
     Serial.printf("Migrate Config From SPIFFS to NVS\n");
 
@@ -37,18 +37,20 @@ void cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
     
     if (f.read((uint8_t *)cfg_buffer, BUFFER_SIZE) != BUFFER_SIZE)
     {
+        Serial.printf("ERROR: Migrate config failed, buffer size not matched.\n");
         cfg_buffer[0] = '\0';
         f.close();
         SPIFFS.remove("/config.bin");
-        return;
+        return false;
     }
     f.close();
     cfg_backend = STORAGE_SPIFFS;
     cfg_load(def_value);
     cfg_backend = STORAGE_NVS;
-    cfg_save(def_value);
+    cfg_save(def_value, false, true);
     cfg_confirm();
     SPIFFS.remove("/config.bin");
+    return true;
 }
 #endif
 
@@ -161,7 +163,9 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
         }
         if (!checkPass)
         {
-            if (SPIFFS.begin(true) && SPIFFS.exists("/config.bin")) cfg_migrate2nvs(mqtt_cls, def_value);
+            if (SPIFFS.begin(true) && SPIFFS.exists("/config.bin")) {
+              checkPass = cfg_migrate2nvs(mqtt_cls, def_value);
+            }
             else cfg_init(mqtt_cls, def_value, true);
         }
         return checkPass;
@@ -498,7 +502,7 @@ bool cfg_load(const hp_cfg_t *def_value)
     return true;
 }
 
-void cfg_save(const hp_cfg_t *def_value, bool ignoreString)
+void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
 {
     char current_value[32];
 //    noInterrupts();
@@ -510,7 +514,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString)
             case 1:
                 if (cfg_backend == STORAGE_NVS)
                 {
-                    if (*(uint8_t *)(cfg_buffer + def_value[i].offset) == *(uint8_t *)def_value[i].assign) continue;
+                    if (*(uint8_t *)(cfg_buffer + def_value[i].offset) == *(uint8_t *)def_value[i].assign && !forceSave) continue;
                     nvs_set_u8(nvs, def_value[i].nvs_name, *(uint8_t *)def_value[i].assign);
                     *(uint8_t *)(cfg_buffer + def_value[i].offset) = *(uint8_t *)def_value[i].assign;
                 }else if (cfg_backend == STORAGE_SPIFFS)
@@ -524,7 +528,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString)
             case 2:
                 if (cfg_backend == STORAGE_NVS)
                 {
-                      if (*(uint16_t *)(cfg_buffer + def_value[i].offset) == *(uint16_t *)def_value[i].assign) continue;
+                      if (*(uint16_t *)(cfg_buffer + def_value[i].offset) == *(uint16_t *)def_value[i].assign && !forceSave) continue;
                     nvs_set_u16(nvs, def_value[i].nvs_name, *(uint16_t *)def_value[i].assign);
                     *(uint16_t *)(cfg_buffer + def_value[i].offset) = *(uint16_t *)def_value[i].assign;
                 }else if (cfg_backend == STORAGE_SPIFFS)
@@ -538,7 +542,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString)
             case 4:
                 if (cfg_backend == STORAGE_NVS)
                 {
-                    if (*(uint32_t *)(cfg_buffer + def_value[i].offset) == *(uint32_t *)def_value[i].assign) continue;
+                    if (*(uint32_t *)(cfg_buffer + def_value[i].offset) == *(uint32_t *)def_value[i].assign && !forceSave) continue;
                     nvs_set_u32(nvs, def_value[i].nvs_name, *(uint32_t *)def_value[i].assign);
                     *(uint32_t *)(cfg_buffer + def_value[i].offset) = *(uint32_t *)def_value[i].assign;
                 }else if (cfg_backend == STORAGE_SPIFFS)
@@ -550,11 +554,11 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString)
                 }
                 break;
             case 0:
-                if (ignoreString) continue;
+                if (ignoreString && !forceSave) continue;
                 if (cfg_backend == STORAGE_NVS)
                 {
                     size_t required_size = 32;
-                    if (ESP_OK == nvs_get_str(nvs, def_value[i].nvs_name, current_value, &required_size))
+                    if (ESP_OK == nvs_get_str(nvs, def_value[i].nvs_name, current_value, &required_size) && !forceSave)
                     {
                         if (required_size == strlen(*(char **)def_value[i].assign) + 1 && strncmp(current_value, *(char **)def_value[i].assign, required_size) == 0)
                         {
@@ -565,7 +569,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString)
                 cfg_write_string(def_value, i, *(char **)def_value[i].assign, 0);
                 break;
             default:
-                if (ignoreString) continue;
+                if (ignoreString && !forceSave) continue;
                 cfg_write_string(def_value, i, *(char **)def_value[i].assign, def_value[i].size);
                 break;
         }

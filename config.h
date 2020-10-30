@@ -141,8 +141,9 @@ bool cfg_load(const hp_cfg_t *def_value);
  *
  * @param[in]  hp_cfg_t      configure variables
  * @param[in]  ignoreString  ignore check string to increase speed on NVS
+ * @param[in]  forceSave     ignore check data consistent
  */
-void cfg_save(const hp_cfg_t *def_value, bool ignoreString = false);
+void cfg_save(const hp_cfg_t *def_value, bool ignoreString = false, bool forceSave = false);
 
 /**@{*/
 /**

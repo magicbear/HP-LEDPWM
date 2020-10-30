@@ -40,7 +40,7 @@ uint8_t  PWM_AUTO_FULL_POWER = 1;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.30"
+#define _VERSION "2.31"
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
