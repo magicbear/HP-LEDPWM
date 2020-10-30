@@ -1,5 +1,7 @@
 # HP-LEDPWM
-Using ESP8266/ESP32 To Control LED bright
+WiFi Control LED bright/SCR/Color temperature by using ESP8266/ESP32
+
+Protocol: MQTT
 
 ## Features
 - Configurable device name
@@ -12,6 +14,9 @@ Using ESP8266/ESP32 To Control LED bright
 - Start/End Range for bright contorl
 - Smooth Bright / Color Temperature Change
 - Auto save Bright / Color Temperature and will smooth startup
+
+## Demo MQTT Server
+https://github.com/magicbear/HP-MQTTServer
 
 ## Diagram
 ![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWM/master/sch.png)
