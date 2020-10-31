@@ -2,7 +2,11 @@
 
 #define HP_CONFIG_H
 
-#define STORAGE_BY_SPIFFS
+#ifdef ARDUINO_ARCH_ESP8266
+  #ifndef BEARSSL_SSL_BASIC
+  #error Please check config for ESP8266 compile params, required: SSL Support -> Basic SSL ciphers / Flash Size: with at least 32K SPIFFS
+  #endif
+#endif
 
 extern char *dev_name;
 extern char *ssid;
@@ -167,11 +171,11 @@ void cfg_confirm();
  */
 void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_buf_size,  char *mqtt_cls);
 
-uint8_t cfg_read_uint8(const hp_cfg_t *def_value, int index);
-uint16_t cfg_read_uint16(const hp_cfg_t *def_value, int index);
-uint32_t cfg_read_uint32(const hp_cfg_t *def_value, int index);
-int cfg_read_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize);
-int cfg_write_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize);
+//uint8_t cfg_read_uint8(const hp_cfg_t *def_value, int index);
+//uint16_t cfg_read_uint16(const hp_cfg_t *def_value, int index);
+//uint32_t cfg_read_uint32(const hp_cfg_t *def_value, int index);
+//int cfg_read_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize);
+//int cfg_write_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize);
 uint16_t boot_count_increase();
 void boot_count_reset();
 

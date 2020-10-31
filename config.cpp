@@ -78,6 +78,7 @@ void cfg_begin()
             nvs_get_str(nvs, "class", szClass, &required_size);
             free(szClass);
         }
+        nvs_close(nvs);
     } else if ((rc == ESP_ERR_NVS_PART_NOT_FOUND || rc == ESP_ERR_NVS_NOT_INITIALIZED) && SPIFFS.begin(true))
     {
         cfg_backend = STORAGE_SPIFFS;
@@ -146,9 +147,11 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
 #ifdef ESP_NVS_H
     if (cfg_backend == STORAGE_NVS)
     {
+        int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
+        if (rc != ESP_OK) return false;
         bool checkPass = true;
         size_t required_size;
-        int rc = nvs_get_str(nvs, "class", NULL, &required_size);
+        rc = nvs_get_str(nvs, "class", NULL, &required_size);
         if (rc == ESP_ERR_NVS_NOT_FOUND || required_size != strlen(mqtt_cls) + 1)
         {
             checkPass = false;
@@ -168,6 +171,7 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
             }
             else cfg_init(mqtt_cls, def_value, true);
         }
+        nvs_close(nvs);
         return checkPass;
     } else 
 #endif
@@ -197,6 +201,8 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
     Serial.printf("Initalize configure\n");
     if (cfg_backend == STORAGE_NVS)
     {
+        int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
+        if (rc != ESP_OK) return;
 #ifdef ESP_NVS_H
         nvs_set_str(nvs, "class", mqtt_cls);
 #endif
@@ -277,6 +283,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
     {
 #ifdef ESP_NVS_H
         nvs_commit(nvs);
+        nvs_close(nvs);
 #endif
     } else if (cfg_backend == STORAGE_SPIFFS)
     {
@@ -479,6 +486,13 @@ int cfg_write_string(const hp_cfg_t *def_value, int index, char *buf, int bufsiz
 
 bool cfg_load(const hp_cfg_t *def_value)
 {
+#ifdef ESP_NVS_H
+    if (cfg_backend == STORAGE_NVS)
+    {
+        int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
+        if (rc != ESP_OK) return false;
+    }
+#endif
     for (int i = 0; def_value[i].offset != 0; i++)
     {
         if (def_value[i].assign == NULL) continue;
@@ -508,6 +522,7 @@ bool cfg_load(const hp_cfg_t *def_value)
                     if (cfg_read_string(def_value, i, (char *)(cfg_buffer + def_value[i].offset), 0) == -1)
                     {
                         Serial.printf("Failed to read NVS key %s\n", def_value[i].nvs_name);
+                        goto failed;
                         return false;
                     }
                 }
@@ -517,16 +532,38 @@ bool cfg_load(const hp_cfg_t *def_value)
             default:
                 if (cfg_read_string(def_value, i, (char *)def_value[i].assign, def_value[i].size) == -1)
                 {
+                    goto failed;
                     return false;
                 }
                 break;
         }
     }
+#ifdef ESP_NVS_H
+    if (cfg_backend == STORAGE_NVS)
+    {
+        nvs_close(nvs);
+    }
+#endif
     return true;
+failed:
+#ifdef ESP_NVS_H
+    if (cfg_backend == STORAGE_NVS)
+    {
+        nvs_close(nvs);
+    }
+#endif
+    return false;
 }
 
 void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
 {
+#ifdef ESP_NVS_H
+    if (cfg_backend == STORAGE_NVS)
+    {
+        int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
+        if (rc != ESP_OK) return ;
+    }
+#endif
     char current_value[32];
 //    noInterrupts();
     for (int i = 0; def_value[i].offset != 0; i++)
@@ -629,6 +666,7 @@ void cfg_confirm() {
     {
 #ifdef ARDUINO_ARCH_ESP32
         nvs_commit(nvs);
+        nvs_close(nvs);
 #endif
     } else if (cfg_backend == STORAGE_SPIFFS){
         SPIFFS.remove("/config.bin");
@@ -818,12 +856,15 @@ void cfg_reset(const hp_cfg_t *def_value)
 {
     if (cfg_backend == STORAGE_NVS) {
 #ifdef ESP_NVS_H
+        int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
+        if (rc != ESP_OK) return;
         nvs_erase_key(nvs, "class");
         nvs_erase_key(nvs, "boot_count");
         for (int i = 0; def_value[i].offset != 0; i++)
         {
             nvs_erase_key(nvs, def_value[i].nvs_name);
         }
+        nvs_close(nvs);
 //        nvs_erase_all(nvs);
 #endif
     } else if (cfg_backend == STORAGE_SPIFFS)

@@ -539,7 +539,7 @@ void ICACHE_RAM_ATTR onTimerISR(){
                 timer1_write(5 * (target_scr_timerout1 - micros()));
             }
         }
-        if (!matched)
+        if (!matched)//&& zc_interval > 0 && (target_scr_timerout1 != 0 || target_scr_timerout2 != 0))
         {
             // 5 MHz counting, 1 Tick = 0.2us, sleep 0.1% of duty cycle ~= 10ms / 1000 = 10us
             timer1_write(50); // sleep 10us
@@ -901,6 +901,7 @@ void setup() {
     {
       char ch = Serial.read();
       if (ch == 'R' && Serial.read() == 'r') {
+          Serial.printf("Reset config command from serial.\n");
           cfg_reset(def_cfg);
           ESP.restart();
       }
