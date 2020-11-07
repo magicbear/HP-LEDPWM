@@ -48,7 +48,6 @@ bool cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
     cfg_load(def_value);
     cfg_backend = STORAGE_NVS;
     cfg_save(def_value, false, true);
-    cfg_confirm();
     SPIFFS.remove("/config.bin");
     return true;
 }
@@ -103,18 +102,22 @@ void cfg_begin()
 #else
     SPIFFS.begin();
     FSInfo fs_info;
-    if (!SPIFFS.info(fs_info))
+    cfg_buffer = (char *)calloc(BUFFER_SIZE, 1);
+    if (!SPIFFS.info(fs_info) || true)
     {
         cfg_backend = STORAGE_EEPROM;
         EEPROM.begin(256);
     } else {
         cfg_backend = STORAGE_SPIFFS;
-        cfg_buffer = (char *)calloc(BUFFER_SIZE, 1);
+//        if (SPIFFS.exists("/config.bin"))
+//          Serial.printf("Config is exists\n");
+//        else
+//          Serial.printf("Config is not exists\n");
         File f = SPIFFS.open("/config.bin", "r");
-        
-        if (f.read((uint8_t *)cfg_buffer, BUFFER_SIZE) != BUFFER_SIZE)
+        int r;
+        if ((r = f.read((uint8_t *)cfg_buffer, BUFFER_SIZE)) != BUFFER_SIZE)
         {
-            
+            Serial.printf("Read config failed, read: %d\n", r);
         }
         f.close();
     }
@@ -179,7 +182,7 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
     {
       if (strncmp(cfg_buffer, mqtt_cls, strlen(mqtt_cls)) != 0)
       {
-//        Serial.printf("INVALID CONFIG HEADER, RESET CONFIG FILES: \"%s\" != \"%s\"\n", mqtt_cls, cfg_buffer);
+        Serial.printf("INVALID CONFIG HEADER, RESET CONFIG FILES: \"%s\" != \"%s\"\n", mqtt_cls, cfg_buffer);
         cfg_init(mqtt_cls, def_value, true);
         return false;
       }
@@ -201,9 +204,9 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
     Serial.printf("Initalize configure\n");
     if (cfg_backend == STORAGE_NVS)
     {
+#ifdef ESP_NVS_H
         int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
         if (rc != ESP_OK) return;
-#ifdef ESP_NVS_H
         nvs_set_str(nvs, "class", mqtt_cls);
 #endif
     } else if (cfg_backend == STORAGE_SPIFFS)
@@ -294,6 +297,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
         f.write(cfg_buffer, BUFFER_SIZE);
 #endif
         f.close();
+        Serial.printf("Init save %s\n", SPIFFS.exists("/config.bin") ? "Success" : "Failed");
     } else 
     {
         EEPROM.commit();
@@ -431,8 +435,7 @@ int cfg_read_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize
     while (chEEP = EEPROM.read(iAddr++))
     {
         *p++ = chEEP;
-    
-        if (iAddr >= def_value[index].offset + bufsize)
+        if (bufsize != 0 && iAddr >= def_value[index].offset + bufsize)
         {
             return -1;
         }
@@ -464,6 +467,8 @@ int cfg_write_string(const hp_cfg_t *def_value, int index, char *buf, int bufsiz
         strncpy(cfg_buffer + def_value[index].offset, buf, bufsize);
         return strlen(cfg_buffer + def_value[index].offset);
     }
+
+    if (bufsize == 0) bufsize = strlen(buf) + 1;
     char *p;
     int iaddr;
     
@@ -478,8 +483,8 @@ int cfg_write_string(const hp_cfg_t *def_value, int index, char *buf, int bufsiz
             break;
         } else {
             EEPROM.write(iaddr++, *p++);
-        }        
-        if (*p == '\0') break;
+        }
+        if (*(p-1) == '\0') break;
     }
     return p - (char *)buf;
 }
@@ -522,6 +527,12 @@ bool cfg_load(const hp_cfg_t *def_value)
                     if (cfg_read_string(def_value, i, (char *)(cfg_buffer + def_value[i].offset), 0) == -1)
                     {
                         Serial.printf("Failed to read NVS key %s\n", def_value[i].nvs_name);
+                        goto failed;
+                        return false;
+                    }
+                } else if (cfg_backend == STORAGE_EEPROM) {
+                    if (cfg_read_string(def_value, i, (char *)cfg_buffer + def_value[i].offset, 0) == -1)
+                    {
                         goto failed;
                         return false;
                     }
@@ -644,7 +655,10 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
     }
     if (cfg_backend == STORAGE_NVS)
     {
-        
+#ifdef ARDUINO_ARCH_ESP32
+        nvs_commit(nvs);
+        nvs_close(nvs);
+#endif
     } else if (cfg_backend == STORAGE_SPIFFS)
     {
         File f = SPIFFS.open("/config.bin.bak", "w");
@@ -654,24 +668,13 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
         f.write(cfg_buffer, BUFFER_SIZE);
 #endif
         f.close();
+        SPIFFS.remove("/config.bin");
+        SPIFFS.rename("/config.bin.bak", "/config.bin");
     } else 
     {
         EEPROM.commit();
     }
 //    interrupts();
-}
-
-void cfg_confirm() {  
-    if (cfg_backend == STORAGE_NVS)
-    {
-#ifdef ARDUINO_ARCH_ESP32
-        nvs_commit(nvs);
-        nvs_close(nvs);
-#endif
-    } else if (cfg_backend == STORAGE_SPIFFS){
-        SPIFFS.remove("/config.bin");
-        SPIFFS.rename("/config.bin.bak", "/config.bin");
-    }
 }
 
 void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_buf_size, char *mqtt_cls)
@@ -689,7 +692,7 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
 //#ifdef ARDUINO_ARCH_ESP8266
 //      WiFi.softAPConfig(IPAddress(192,168,32,1), IPAddress(192,168,32,1), IPAddress(255, 255, 255, 0)); // Set AP Address
 //#endif
-      while(!WiFi.softAP(mqtt_cls)){}; // Startup AP
+      while(!WiFi.softAP(mqtt_cls)){ delay(10); yield(); }; // Startup AP
  
       WiFiServer telnetServer(23);
       WiFiClient telnetClient;
@@ -837,7 +840,6 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
       }
       Serial.printf("\n");
       cfg_save(def_value);
-      cfg_confirm();
       if (telnetClient)
       {
           telnetClient.stop();
@@ -876,5 +878,6 @@ void cfg_reset(const hp_cfg_t *def_value)
         {
             EEPROM.write(i, 0);
         }
+        EEPROM.commit();
     }
 }

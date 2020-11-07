@@ -40,7 +40,7 @@ uint8_t  PWM_AUTO_FULL_POWER = 1;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.31"
+#define _VERSION "2.32"
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
@@ -85,6 +85,7 @@ uint16_t set_ct = 4000;
 uint8_t  set_state = 0;
 uint8_t  inTrigger = 0;
 uint8_t  CH2_MODE = 0;
+uint8_t  SCR_PreRelease = 1;
 
 uint32_t zc_interval = 0;
 uint32_t zc_last = 0;
@@ -130,6 +131,7 @@ const hp_cfg_t def_cfg[] = {
   {88, sizeof(uint8_t), (uint8_t)0,   &BRIGHT_ADC_PIN, false, "pin_adc_bright"},             // UINT8:  BRIGHT_ADC_PIN
   {89, sizeof(uint8_t), (uint8_t)0,   &AUTO_SAVE_DISABLED, false, "b_autosave"},             // UINT8:  AUTO_SAVE_DISABLED
   {90, sizeof(uint8_t), (uint8_t)0,   &CH2_MODE, false, "ch2_mode"},             // UINT8:  CH2_MODE
+  {91, sizeof(uint8_t), (uint8_t)5,   &SCR_PreRelease, false, "scr_prerelease"},             // UINT8:  SCR_PRERELEASE
   {96, 0, (uint8_t)0, &ssid, true, "ssid"},                    // STRING: SSID
   {128, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
   {160, 0, (uint8_t)0, &mqtt_server, true, "mqtt_srv"},        // STRING: MQTT SERVER
@@ -484,6 +486,8 @@ inline void updateSCRState(bool state, int pin)
 
 uint32_t target_scr_timerout1 = 0;
 uint32_t target_scr_timerout2 = 0;
+uint32_t close_scr_timeout1 = 0;
+uint32_t close_scr_timeout2 = 0;
 
 void ICACHE_RAM_ATTR onTimerISR(){
     if (PWM_SCR_DELAY != 0)
@@ -516,28 +520,60 @@ void ICACHE_RAM_ATTR onTimerISR(){
     // 打开SCR
     else
     {
+        uint32_t  currentMicro = micros();
         bool matched = false;
-        if (target_scr_timerout1 != 0 && micros() >= target_scr_timerout1 && scr_current_bright != 0)
+        if (target_scr_timerout1 != 0 && currentMicro >= target_scr_timerout1 && scr_current_bright != 0)
         {
             matched = true;
             target_scr_timerout1 = 0;
+            if (SCR_PreRelease == 0)
+            {
+                close_scr_timeout1 = 0;
+            } else if (SCR_PreRelease == 1)
+            {
+                close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
+            } else {
+                close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
+            }            
             timerRunning = false;
             updateSCRState(true, PWM_PIN); // 打开SCR
-            if (micros() < target_scr_timerout2)
-            {
-                timer1_write(5 * (target_scr_timerout2 - micros()));
-            }
         }
-        if (target_scr_timerout2 != 0 && micros() >= target_scr_timerout2 && scr_current_bright2 != 0)
+        if (close_scr_timeout1 != 0 && currentMicro >= close_scr_timeout1)
+        {
+            matched = true;
+            close_scr_timeout1 = 0;
+            updateSCRState(false, PWM_PIN); // 打开SCR
+        }
+        if (target_scr_timerout2 != 0 && currentMicro >= target_scr_timerout2 && scr_current_bright2 != 0)
         {
             matched = true;
             target_scr_timerout2 = 0;
+            if (SCR_PreRelease == 0)
+            {
+                close_scr_timeout2 = 0;
+            } else if (SCR_PreRelease == 1)
+            {
+                close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
+            } else {
+                close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
+            }
             timerRunning = false;
             updateSCRState(true, PWM_WPIN); // 打开SCR
-            if (micros() < target_scr_timerout1)
-            {
-                timer1_write(5 * (target_scr_timerout1 - micros()));
-            }
+        }
+        if (close_scr_timeout2 != 0 && currentMicro >= close_scr_timeout2)
+        {
+            matched = true;
+            close_scr_timeout2 = 0;
+            updateSCRState(false, PWM_PIN); // 打开SCR
+        }
+        uint32_t nextTick = 0xffffffff;
+        if (currentMicro < target_scr_timerout1 && target_scr_timerout1 - currentMicro <= nextTick) nextTick = target_scr_timerout1 - currentMicro;
+        if (currentMicro < target_scr_timerout2 && target_scr_timerout2 - currentMicro <= nextTick) nextTick = target_scr_timerout2 - currentMicro;
+        if (currentMicro < close_scr_timeout1 && close_scr_timeout1 - currentMicro <= nextTick) nextTick = close_scr_timeout1 - currentMicro;
+        if (currentMicro < close_scr_timeout2 && close_scr_timeout2 - currentMicro <= nextTick) nextTick = close_scr_timeout2 - currentMicro;
+        if (nextTick != 0xffffffff)
+        {
+            timer1_write(5 * (nextTick));
         }
         if (!matched)//&& zc_interval > 0 && (target_scr_timerout1 != 0 || target_scr_timerout2 != 0))
         {
@@ -549,22 +585,23 @@ void ICACHE_RAM_ATTR onTimerISR(){
 
 void ICACHE_RAM_ATTR ZC_detect()
 {
+    uint32_t currentMicro = micros();
     inTrigger = 1;
     if (zc_interval == 0)
     {
         if (zc_last != 0)
         {
-            zc_interval = micros() - zc_last;
+            zc_interval = currentMicro - zc_last;
         } else {
-            zc_last = micros();
+            zc_last = currentMicro;
         }
-    } else if (micros() - zc_last >= 3000)  // Max 300 Hz
+    } else if (currentMicro - zc_last >= 3000)  // Max 300 Hz
     {
-        if (micros() - zc_last <= 12500)  // Min at 80 Hz
+        if (currentMicro - zc_last <= 12500)  // Min at 80 Hz
         {
-            zc_interval = micros() - zc_last;          
+            zc_interval = currentMicro - zc_last;          
         }
-        zc_last = micros();
+        zc_last = currentMicro;
         ZC = 1;
 
         // DIV 16 = 80/16 = 5 Mhz = 0.2us per tick
@@ -594,10 +631,10 @@ void ICACHE_RAM_ATTR ZC_detect()
                 timerRunning = true;
                 long tSleepus = map(scr_current_bright, PWM_START, PWM_PERIOD, zc_interval, 0);
                 long tSleepus2 = 1000000;
-                target_scr_timerout1 = micros() + tSleepus;
+                target_scr_timerout1 = currentMicro + tSleepus;
                 if (PWM_WPIN != 0){
                     tSleepus2 = map(scr_current_bright2, PWM_START, PWM_PERIOD, zc_interval, 0);
-                    target_scr_timerout2 = micros() + tSleepus2;
+                    target_scr_timerout2 = currentMicro + tSleepus2;
                 } else {
                     target_scr_timerout2 = 1000000;
                 }
@@ -792,7 +829,7 @@ void setup() {
 #ifdef ARDUINO_ARCH_ESP8266
   if ((resetInfo->reason == REASON_DEFAULT_RST || resetInfo->reason == REASON_EXT_SYS_RST) && strlen(ssid) != 0)
 #elif ARDUINO_ARCH_ESP32
-  if (PWM_FREQUENCE <= 40000)
+  if (PWM_FREQUENCE <= 40000 && (WORK_MODE == 0 || WORK_MODE == 1))
   {
       setCpuFrequencyMhz(80);
   }
@@ -1243,6 +1280,12 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       client.publish("status", msg_buf);
       last_state = -1;
       sendMeta();
+  } else if (strcmp(topic, "set_scr_prerelease") == 0)
+  {
+      payload[length] = 0;
+      SCR_PreRelease = atoi((char *)payload);
+      CFG_SAVE();
+      sendMeta();
   } else if (strcmp(topic, "set_startup_smooth") == 0)
   {
       payload[length] = 0;
@@ -1275,7 +1318,7 @@ void sendMeta()
     client.publish("dev", msg_buf);
     if (isScrMode)
     {
-        p = msg_buf + sprintf(msg_buf, "{\"scr_delay\":%d,\"trigger_pin\":%d}", PWM_SCR_DELAY, PWM_SCR_TRIGGER);
+        p = msg_buf + sprintf(msg_buf, "{\"scr_delay\":%d,\"trigger_pin\":%d,\"prerelease\":%d}", PWM_SCR_DELAY, PWM_SCR_TRIGGER, SCR_PreRelease);
         client.publish("dev", msg_buf);        
     }
     
@@ -1409,13 +1452,12 @@ void loop() {
         disableInterrupts();
         cfg_save(def_cfg, true);
         enableInterrupts();
-        yield();
+//        yield();
         usages += micros() - t1;
-        delay(50);
-        t1 = micros();
-        disableInterrupts();
-        cfg_confirm();
-        enableInterrupts();
+//        delay(50);
+//        t1 = micros();
+//        disableInterrupts();
+//        enableInterrupts();
         Serial.printf("Done in %ld us  save: %ld us\n", micros() - t1 + usages, usages);
       }
       last_state_hold = 0;

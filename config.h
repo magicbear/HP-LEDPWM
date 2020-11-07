@@ -151,13 +151,6 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString = false, bool forceSa
 
 /**@{*/
 /**
- * @brief      write buffer to storage backend
- *
- */
-void cfg_confirm();
-
-/**@{*/
-/**
  * @brief      setup wifi configure tools
  * 
  * This function will startup a WiFi Telnet server to wait telnet conn and
@@ -182,8 +175,7 @@ void boot_count_reset();
 #define CFG_CHECK() cfg_check(mqtt_cls, def_cfg)
 #define CFG_INIT(FULL_INIT) cfg_init(mqtt_cls, def_cfg, FULL_INIT)
 #define CFG_LOAD() cfg_load(def_cfg)
-#define CFG_SAVE() { cfg_save(def_cfg); cfg_confirm(); }
-#define CFG_SAFE_SAVE() cfg_save(def_cfg);
+#define CFG_SAVE() cfg_save(def_cfg);
 #define CFG_READ_UINT8(addr)  cfg_read_uint8(def_cfg, addr)
 #define CFG_READ_UINT16(addr)  cfg_read_uint16(def_cfg, addr)
 #define CFG_READ_UINT32(addr)  cfg_read_uint32(def_cfg, addr)
