@@ -36,7 +36,7 @@ uint8_t  PWM_SCR_TRIGGER = 0;
 DRAM_ATTR int16_t  PWM_SCR_DELAY = 0;
 uint8_t  PWM_AUTO_FULL_POWER = 1;
 
-#define DEBUG_LEVEL 2
+#define DEBUG_LEVEL 3
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
@@ -526,14 +526,16 @@ void ICACHE_RAM_ATTR onTimerISR(){
         {
             matched = true;
             target_scr_timerout1 = 0;
-            if (SCR_PreRelease == 0)
+            close_scr_timeout1 = 0;
+            if (scr_current_bright != PWM_PERIOD)
             {
-                close_scr_timeout1 = 0;
-            } else if (SCR_PreRelease == 1)
-            {
-                close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
-            } else {
-                close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
+                if (SCR_PreRelease == 1)
+                {
+                    close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
+                } else if (SCR_PreRelease != 0)
+                {
+                    close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
+                }
             }
             updateSCRState(true, PWM_PIN); // 打开SCR
         }
@@ -541,20 +543,21 @@ void ICACHE_RAM_ATTR onTimerISR(){
         {
             matched = true;
             close_scr_timeout1 = 0;
-            updateSCRState(false, PWM_PIN); // 打开SCR
+            updateSCRState(false, PWM_PIN); // 关闭SCR
         }
         if (target_scr_timerout2 != 0 && currentMicro >= target_scr_timerout2 && scr_current_bright2 != 0)
         {
             matched = true;
             target_scr_timerout2 = 0;
-            if (SCR_PreRelease == 0)
+            close_scr_timeout2 = 0;
+            if (scr_current_bright2 != PWM_PERIOD)
             {
-                close_scr_timeout2 = 0;
-            } else if (SCR_PreRelease == 1)
-            {
-                close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
-            } else {
-                close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
+                if (SCR_PreRelease == 1)
+                {
+                    close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
+                } else if (SCR_PreRelease != 0) {
+                    close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
+                }
             }
             updateSCRState(true, PWM_WPIN); // 打开SCR
         }
@@ -618,21 +621,21 @@ void ICACHE_RAM_ATTR ZC_detect()
                 timer1_write(5 * PWM_SCR_DELAY);
             }
         } else {
-            if (scr_current_bright != PWM_END)
+            if (scr_current_bright != PWM_PERIOD)
             {
                 updateSCRState(false, PWM_PIN); // 过零触发，关闭SCR
             }
-            if (scr_current_bright2 != PWM_END && PWM_WPIN != 0)
+            if (scr_current_bright2 != PWM_PERIOD && PWM_WPIN != 0)
             {
                 updateSCRState(false, PWM_WPIN); // 过零触发，关闭SCR
             }
             if (scr_current_bright != 0 || scr_current_bright2 != 0){
                 timerRunning = true;
-                long tSleepus = map(scr_current_bright, PWM_START, PWM_PERIOD, zc_interval, 0);
+                long tSleepus = map(scr_current_bright, 0, PWM_PERIOD, zc_interval, 0);
                 long tSleepus2 = 1000000;
                 target_scr_timerout1 = currentMicro + tSleepus;
                 if (PWM_WPIN != 0){
-                    tSleepus2 = map(scr_current_bright2, PWM_START, PWM_PERIOD, zc_interval, 0);
+                    tSleepus2 = map(scr_current_bright2, 0, PWM_PERIOD, zc_interval, 0);
                     target_scr_timerout2 = currentMicro + tSleepus2;
                 } else {
                     target_scr_timerout2 = 1000000;
@@ -640,10 +643,9 @@ void ICACHE_RAM_ATTR ZC_detect()
                 //timer1_write(tSleepus > tSleepus2 && tSleepus2 != -1 ? tSleepus2 * 5 : tSleepus * 5);
 //                long tSleepTick = map(scr_current_bright, PWM_START, PWM_PERIOD, 5 * zc_interval, 0);
                 timer1_write(min(tSleepus, tSleepus2) * 5);
-    #if DEBUG_LEVEL >= 5
-                Serial.printf("T: %d %d\n", tSleepus, tSleepus2);
-    #endif
-    //(zc_interval - (float(scr_current_bright) / PWM_PERIOD * zc_interval)
+//    #if DEBUG_LEVEL >= 5
+//                Serial.printf("T: %d %d\n", tSleepus, tSleepus2);
+//    #endif
             }
         }
     }
