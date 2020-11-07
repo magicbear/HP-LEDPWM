@@ -33,7 +33,7 @@ uint16_t STARTUP_SMOOTH_INTERVAL = 500;
 uint8_t  PWM_PIN = 3;
 uint8_t  PWM_WPIN = 0;
 uint8_t  PWM_SCR_TRIGGER = 0;
-int16_t  PWM_SCR_DELAY = 0;
+DRAM_ATTR int16_t  PWM_SCR_DELAY = 0;
 uint8_t  PWM_AUTO_FULL_POWER = 1;
 
 #define DEBUG_LEVEL 2
@@ -484,10 +484,10 @@ inline void updateSCRState(bool state, int pin)
     }
 }
 
-uint32_t target_scr_timerout1 = 0;
-uint32_t target_scr_timerout2 = 0;
-uint32_t close_scr_timeout1 = 0;
-uint32_t close_scr_timeout2 = 0;
+DRAM_ATTR uint32_t target_scr_timerout1 = 0;
+DRAM_ATTR uint32_t target_scr_timerout2 = 0;
+DRAM_ATTR uint32_t close_scr_timeout1 = 0;
+DRAM_ATTR uint32_t close_scr_timeout2 = 0;
 
 void ICACHE_RAM_ATTR onTimerISR(){
     if (PWM_SCR_DELAY != 0)
@@ -534,8 +534,7 @@ void ICACHE_RAM_ATTR onTimerISR(){
                 close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
             } else {
                 close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
-            }            
-            timerRunning = false;
+            }
             updateSCRState(true, PWM_PIN); // 打开SCR
         }
         if (close_scr_timeout1 != 0 && currentMicro >= close_scr_timeout1)
@@ -557,7 +556,6 @@ void ICACHE_RAM_ATTR onTimerISR(){
             } else {
                 close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
             }
-            timerRunning = false;
             updateSCRState(true, PWM_WPIN); // 打开SCR
         }
         if (close_scr_timeout2 != 0 && currentMicro >= close_scr_timeout2)
@@ -574,11 +572,12 @@ void ICACHE_RAM_ATTR onTimerISR(){
         if (nextTick != 0xffffffff)
         {
             timer1_write(5 * (nextTick));
-        }
-        if (!matched)//&& zc_interval > 0 && (target_scr_timerout1 != 0 || target_scr_timerout2 != 0))
+        } else if (!matched)
         {
             // 5 MHz counting, 1 Tick = 0.2us, sleep 0.1% of duty cycle ~= 10ms / 1000 = 10us
-            timer1_write(50); // sleep 10us
+//            timer1_write(50); // sleep 10us
+            timerRunning = false;
+            // Nothing to run, stop timer.
         }
     }
 }
@@ -707,12 +706,8 @@ void inline enableInterrupts()
               }
               timer = timerBegin(0, getApbFrequency() / 5000000, true); // timer_id = 0; divider=80; countUp = true;
               timerAttachInterrupt(timer, &onTimerISR, true);
-//              if (PWM_SCR_DELAY != 0)
-//              {
-                  timerAlarmWrite(timer, 5000000, false); // Run by manual tick
-//              } else {
+              timerAlarmWrite(timer, 5000000, false); // Run by manual tick
 //                  timerAlarmWrite(timer, 1250, true);  // Run by auto tick with 2000 Hz
-//              }
               timerAlarmEnable(timer);
 #endif
           }
@@ -775,6 +770,7 @@ void setup() {
           EN_PORT_CH1 = 0;
           EN_PORT_CH2 = 0;
           PWM_SCR_TRIGGER = 5;
+          CFG_SAVE();
       } else if (digitalRead(34) == HIGH)
       {
           Serial.printf("Auto Initalize by PCB Board - Dual CH\n");
