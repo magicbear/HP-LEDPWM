@@ -33,14 +33,23 @@ uint16_t STARTUP_SMOOTH_INTERVAL = 500;
 uint8_t  PWM_PIN = 3;
 uint8_t  PWM_WPIN = 0;
 uint8_t  PWM_SCR_TRIGGER = 0;
-DRAM_ATTR int16_t  PWM_SCR_DELAY = 0;
+int16_t  PWM_SCR_DELAY = 0;
 uint8_t  PWM_AUTO_FULL_POWER = 1;
 
-#define DEBUG_LEVEL 3
+typedef struct {
+    uint32_t  scr1_open;
+    uint32_t  scr1_close;
+    uint32_t  scr2_open;
+    uint32_t  scr2_close;
+} scr_timing_t;
+
+scr_timing_t executeTiming, pendingTiming;
+
+#define DEBUG_LEVEL 2
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.32"
+#define _VERSION "2.34"
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
@@ -85,7 +94,7 @@ uint16_t set_ct = 4000;
 uint8_t  set_state = 0;
 uint8_t  inTrigger = 0;
 uint8_t  CH2_MODE = 0;
-uint8_t  SCR_PreRelease = 1;
+int8_t   SCR_PreRelease = 1;
 
 uint32_t zc_interval = 0;
 uint32_t zc_last = 0;
@@ -131,7 +140,7 @@ const hp_cfg_t def_cfg[] = {
   {88, sizeof(uint8_t), (uint8_t)0,   &BRIGHT_ADC_PIN, false, "pin_adc_bright"},             // UINT8:  BRIGHT_ADC_PIN
   {89, sizeof(uint8_t), (uint8_t)0,   &AUTO_SAVE_DISABLED, false, "b_autosave"},             // UINT8:  AUTO_SAVE_DISABLED
   {90, sizeof(uint8_t), (uint8_t)0,   &CH2_MODE, false, "ch2_mode"},             // UINT8:  CH2_MODE
-  {91, sizeof(uint8_t), (uint8_t)5,   &SCR_PreRelease, false, "scr_prerelease"},             // UINT8:  SCR_PRERELEASE
+  {91, sizeof(int8_t), (int8_t)5,     &SCR_PreRelease, false, "scr_prerelease"},             // UINT8:  SCR_PRERELEASE
   {96, 0, (uint8_t)0, &ssid, true, "ssid"},                    // STRING: SSID
   {128, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
   {160, 0, (uint8_t)0, &mqtt_server, true, "mqtt_srv"},        // STRING: MQTT SERVER
@@ -484,104 +493,56 @@ inline void updateSCRState(bool state, int pin)
     }
 }
 
-DRAM_ATTR uint32_t target_scr_timerout1 = 0;
-DRAM_ATTR uint32_t target_scr_timerout2 = 0;
-DRAM_ATTR uint32_t close_scr_timeout1 = 0;
-DRAM_ATTR uint32_t close_scr_timeout2 = 0;
+bool timerMarkNextTick(uint32_t currentMicro)
+{
+    uint32_t nextTick = 0xffffffff;
+    if (currentMicro < executeTiming.scr1_open  && executeTiming.scr1_open  - currentMicro <= nextTick)  nextTick = executeTiming.scr1_open - currentMicro;
+    if (currentMicro < executeTiming.scr1_close && executeTiming.scr1_close - currentMicro <= nextTick)  nextTick = executeTiming.scr1_close - currentMicro;
+    if (currentMicro < executeTiming.scr2_open  && executeTiming.scr2_open  - currentMicro <= nextTick)  nextTick = executeTiming.scr2_open - currentMicro;
+    if (currentMicro < executeTiming.scr2_close && executeTiming.scr2_close - currentMicro <= nextTick)  nextTick = executeTiming.scr2_close - currentMicro;
+    // Checking for overflow micros
+    if (nextTick <= 5000000)  // nextTick != 0xffffffff && 
+    {
+        timer1_write(5 * (nextTick));
+        return true;
+    } else if (memcmp(&executeTiming, &pendingTiming, sizeof(scr_timing_t)) != 0) {
+        memcpy(&executeTiming, &pendingTiming, sizeof(scr_timing_t));
+        return timerMarkNextTick(currentMicro);
+    }
+    return false;
+}
 
 void ICACHE_RAM_ATTR onTimerISR(){
-    if (PWM_SCR_DELAY != 0)
+    uint32_t  currentMicro = micros();
+    bool matched = false;
+    if (executeTiming.scr1_open != 0 && currentMicro >= executeTiming.scr1_open && scr_current_bright != 0)
     {
-          uint16_t on_time = (float(scr_current_bright) / PWM_PERIOD * zc_interval); // SCR打开时间
-          bool using_cycleTime = on_time * 2 / zc_interval > 0;
-          uint32_t zc_cycle = micros() - zc_last;
-
-          // (using_cycleTime && zc_cycle <= PWM_SCR_DELAY + 30) || (!using_cycleTime && 
-          if (justZeroCrossing == 1)
-          {
-              justZeroCrossing = 2;
-              // 新过零触发，旧触发开启中
-              if (scr_current_bright != PWM_PERIOD)
-              {
-                  updateSCRState(false, PWM_PIN); // 过零触发，关闭SCR
-                  timer1_write(5 * (zc_interval - on_time + ((int32_t)PWM_SCR_DELAY - (int32_t)zc_cycle)));
-//                  Serial.printf("w %d %d\n", zc_interval - on_time + ((int32_t)(PWM_SCR_DELAY - (int32_t)zc_cycle)), on_time);
-              } else {
-                  timerRunning = false;
-              }
-          } else if (scr_current_bright != 0)
-          {
-              lastZC_id = ZC_id + 1;
-              updateSCRState(true, PWM_PIN); // 打开SCR
-              justZeroCrossing = 1;
-              timer1_write(5 * (on_time));
-          }
+        matched = true;
+        executeTiming.scr1_open = 0;
+        updateSCRState(true, PWM_PIN); // 打开SCR
     }
-    // 打开SCR
-    else
+    if (executeTiming.scr1_close != 0 && currentMicro >= executeTiming.scr1_close)
     {
-        uint32_t  currentMicro = micros();
-        bool matched = false;
-        if (target_scr_timerout1 != 0 && currentMicro >= target_scr_timerout1 && scr_current_bright != 0)
-        {
-            matched = true;
-            target_scr_timerout1 = 0;
-            close_scr_timeout1 = 0;
-            if (scr_current_bright != PWM_PERIOD)
-            {
-                if (SCR_PreRelease == 1)
-                {
-                    close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
-                } else if (SCR_PreRelease != 0)
-                {
-                    close_scr_timeout1 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
-                }
-            }
-            updateSCRState(true, PWM_PIN); // 打开SCR
-        }
-        if (close_scr_timeout1 != 0 && currentMicro >= close_scr_timeout1)
-        {
-            matched = true;
-            close_scr_timeout1 = 0;
-            updateSCRState(false, PWM_PIN); // 关闭SCR
-        }
-        if (target_scr_timerout2 != 0 && currentMicro >= target_scr_timerout2 && scr_current_bright2 != 0)
-        {
-            matched = true;
-            target_scr_timerout2 = 0;
-            close_scr_timeout2 = 0;
-            if (scr_current_bright2 != PWM_PERIOD)
-            {
-                if (SCR_PreRelease == 1)
-                {
-                    close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > 20 ? currentMicro + 20 : 0;
-                } else if (SCR_PreRelease != 0) {
-                    close_scr_timeout2 = zc_interval - (currentMicro - zc_last) > SCR_PreRelease*10 ?  currentMicro + zc_interval - (currentMicro - zc_last) - SCR_PreRelease*10 : 0;
-                }
-            }
-            updateSCRState(true, PWM_WPIN); // 打开SCR
-        }
-        if (close_scr_timeout2 != 0 && currentMicro >= close_scr_timeout2)
-        {
-            matched = true;
-            close_scr_timeout2 = 0;
-            updateSCRState(false, PWM_PIN); // 打开SCR
-        }
-        uint32_t nextTick = 0xffffffff;
-        if (currentMicro < target_scr_timerout1 && target_scr_timerout1 - currentMicro <= nextTick) nextTick = target_scr_timerout1 - currentMicro;
-        if (currentMicro < target_scr_timerout2 && target_scr_timerout2 - currentMicro <= nextTick) nextTick = target_scr_timerout2 - currentMicro;
-        if (currentMicro < close_scr_timeout1 && close_scr_timeout1 - currentMicro <= nextTick) nextTick = close_scr_timeout1 - currentMicro;
-        if (currentMicro < close_scr_timeout2 && close_scr_timeout2 - currentMicro <= nextTick) nextTick = close_scr_timeout2 - currentMicro;
-        if (nextTick != 0xffffffff)
-        {
-            timer1_write(5 * (nextTick));
-        } else if (!matched)
-        {
-            // 5 MHz counting, 1 Tick = 0.2us, sleep 0.1% of duty cycle ~= 10ms / 1000 = 10us
-//            timer1_write(50); // sleep 10us
-            timerRunning = false;
-            // Nothing to run, stop timer.
-        }
+        matched = true;
+        executeTiming.scr1_close = 0;
+        updateSCRState(false, PWM_PIN); // 关闭SCR
+    }
+    if (executeTiming.scr2_open != 0 && currentMicro >= executeTiming.scr2_open && scr_current_bright2 != 0)
+    {
+        matched = true;
+        executeTiming.scr2_open = 0;
+        updateSCRState(true, PWM_WPIN); // 打开SCR
+    }
+    if (executeTiming.scr2_close != 0 && currentMicro >= executeTiming.scr2_close)
+    {
+        matched = true;
+        executeTiming.scr2_close = 0;
+        updateSCRState(false, PWM_PIN); // 打开SCR
+    }
+    if (!timerMarkNextTick(currentMicro) && !matched)
+    {
+        // 5 MHz counting, 1 Tick = 0.2us, sleep 0.1% of duty cycle ~= 10ms / 1000 = 10us
+        timerRunning = false;
     }
 }
 
@@ -608,46 +569,52 @@ void ICACHE_RAM_ATTR ZC_detect()
 
         // DIV 16 = 80/16 = 5 Mhz = 0.2us per tick
         // 1us = 5 tick
-        if (PWM_SCR_DELAY != 0)
+        if (PWM_SCR_DELAY == 0 && SCR_PreRelease == 0 && scr_current_bright != PWM_PERIOD)
         {
-            if (scr_current_bright == PWM_PERIOD)
-            {
-                updateSCRState(true, PWM_PIN); // 过零触发，关闭SCR
-            } else if (!timerRunning)
-            {
-                justZeroCrossing = 1;
-                ZC_id = ZC_id + 1;
-                timerRunning = true;
-                timer1_write(5 * PWM_SCR_DELAY);
-            }
-        } else {
+            updateSCRState(false, PWM_PIN); // 过零触发，关闭SCR
+        }
+        if (PWM_SCR_DELAY == 0 && SCR_PreRelease == 0 && scr_current_bright2 != PWM_PERIOD && PWM_WPIN != 0)
+        {
+            updateSCRState(false, PWM_WPIN); // 过零触发，关闭SCR
+        }
+        memset(&pendingTiming, 0, sizeof(scr_timing_t));
+        if (scr_current_bright != 0)
+        {
+            pendingTiming.scr1_open = currentMicro + (PWM_SCR_DELAY != 0 ? PWM_SCR_DELAY : 0) + map(scr_current_bright, 0, PWM_PERIOD, zc_interval, 0);
             if (scr_current_bright != PWM_PERIOD)
             {
-                updateSCRState(false, PWM_PIN); // 过零触发，关闭SCR
-            }
-            if (scr_current_bright2 != PWM_PERIOD && PWM_WPIN != 0)
-            {
-                updateSCRState(false, PWM_WPIN); // 过零触发，关闭SCR
-            }
-            if (scr_current_bright != 0 || scr_current_bright2 != 0){
-                timerRunning = true;
-                long tSleepus = map(scr_current_bright, 0, PWM_PERIOD, zc_interval, 0);
-                long tSleepus2 = 1000000;
-                target_scr_timerout1 = currentMicro + tSleepus;
-                if (PWM_WPIN != 0){
-                    tSleepus2 = map(scr_current_bright2, 0, PWM_PERIOD, zc_interval, 0);
-                    target_scr_timerout2 = currentMicro + tSleepus2;
-                } else {
-                    target_scr_timerout2 = 1000000;
+                if (SCR_PreRelease > 0)
+                {
+                    //zc_interval - (currentMicro - zc_last) > SCR_PreRelease * 10 ? 
+                    pendingTiming.scr1_close = pendingTiming.scr1_open + SCR_PreRelease * 10;
+                } else if (SCR_PreRelease < 0)
+                {
+                    pendingTiming.scr1_close = zc_interval - SCR_PreRelease*10 > (currentMicro - zc_last) ?  currentMicro + (PWM_SCR_DELAY != 0 ? PWM_SCR_DELAY : 0) + zc_interval - (currentMicro - zc_last) + SCR_PreRelease*10 : 0;
+                } else 
+                {
+                    pendingTiming.scr1_close = currentMicro + zc_interval - (currentMicro - zc_last) + PWM_SCR_DELAY;
                 }
-                //timer1_write(tSleepus > tSleepus2 && tSleepus2 != -1 ? tSleepus2 * 5 : tSleepus * 5);
-//                long tSleepTick = map(scr_current_bright, PWM_START, PWM_PERIOD, 5 * zc_interval, 0);
-                timer1_write(min(tSleepus, tSleepus2) * 5);
-//    #if DEBUG_LEVEL >= 5
-//                Serial.printf("T: %d %d\n", tSleepus, tSleepus2);
-//    #endif
             }
         }
+        if (scr_current_bright2 != 0)
+        {
+            pendingTiming.scr2_open = currentMicro + (PWM_SCR_DELAY != 0 ? PWM_SCR_DELAY : 0) + map(scr_current_bright2, 0, PWM_PERIOD, zc_interval, 0);
+            if (scr_current_bright != PWM_PERIOD)
+            {
+                if (SCR_PreRelease > 0)
+                {
+                    //zc_interval - (currentMicro - zc_last) > SCR_PreRelease * 10 ? 
+                    pendingTiming.scr2_close = pendingTiming.scr1_open + SCR_PreRelease * 10;
+                } else if (SCR_PreRelease < 0)
+                {
+                    pendingTiming.scr2_close = zc_interval - SCR_PreRelease*10 > (currentMicro - zc_last) ?  currentMicro + (PWM_SCR_DELAY != 0 ? PWM_SCR_DELAY : 0) + zc_interval - (currentMicro - zc_last) + SCR_PreRelease*10 : 0;
+                } else 
+                {
+                    pendingTiming.scr2_close = currentMicro + zc_interval - (currentMicro - zc_last) + PWM_SCR_DELAY;
+                }
+            }
+        }
+        timerMarkNextTick(currentMicro);
     }
     inTrigger = 0;
 }
@@ -738,7 +705,9 @@ void setup() {
 #elif ARDUINO_ARCH_ESP32
   int resetCode = rtc_get_reset_reason(0);
 #endif
-  
+
+  memset(&executeTiming, 0, sizeof(scr_timing_t));
+  memset(&pendingTiming, 0, sizeof(scr_timing_t));
   cfg_begin();
   bool cfgCheck = CFG_CHECK();
   if (!CFG_LOAD())
