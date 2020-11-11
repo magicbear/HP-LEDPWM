@@ -590,6 +590,7 @@ void ICACHE_RAM_ATTR ZC_detect()
                 } else if (SCR_PreRelease < 0)
                 {
                     pendingTiming.scr1_close = zc_interval - SCR_PreRelease*10 > (currentMicro - zc_last) ?  currentMicro + (PWM_SCR_DELAY != 0 ? PWM_SCR_DELAY : 0) + zc_interval - (currentMicro - zc_last) + SCR_PreRelease*10 : 0;
+                    if (pendingTiming.scr1_close <= pendingTiming.scr1_open) pendingTiming.scr1_open = 0;
                 } else 
                 {
                     pendingTiming.scr1_close = currentMicro + zc_interval - (currentMicro - zc_last) + PWM_SCR_DELAY;
@@ -598,7 +599,7 @@ void ICACHE_RAM_ATTR ZC_detect()
         }
         if (scr_current_bright2 != 0)
         {
-            pendingTiming.scr2_open = currentMicro + (PWM_SCR_DELAY != 0 ? PWM_SCR_DELAY : 0) + map(scr_current_bright2, 0, PWM_PERIOD, zc_interval, 0);
+            pendingTiming.scr2_open = currentMicro + (PWM_SCR_DELAY != 0 ? PWM_SCR_DELAY : 0) + (PWM_START * zc_interval / PWM_PERIOD) + map(scr_current_bright2, 0, PWM_PERIOD, zc_interval, 0);
             if (scr_current_bright != PWM_PERIOD)
             {
                 if (SCR_PreRelease > 0)
@@ -608,6 +609,7 @@ void ICACHE_RAM_ATTR ZC_detect()
                 } else if (SCR_PreRelease < 0)
                 {
                     pendingTiming.scr2_close = zc_interval - SCR_PreRelease*10 > (currentMicro - zc_last) ?  currentMicro + (PWM_SCR_DELAY != 0 ? PWM_SCR_DELAY : 0) + zc_interval - (currentMicro - zc_last) + SCR_PreRelease*10 : 0;
+                    if (pendingTiming.scr2_close <= pendingTiming.scr2_open) pendingTiming.scr2_open = 0;
                 } else 
                 {
                     pendingTiming.scr2_close = currentMicro + zc_interval - (currentMicro - zc_last) + PWM_SCR_DELAY;
