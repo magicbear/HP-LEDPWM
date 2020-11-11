@@ -49,7 +49,7 @@ scr_timing_t executeTiming, pendingTiming;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.34"
+#define _VERSION "2.35"
 
 #ifdef ARDUINO_ARCH_ESP32
 #define VERSION _VERSION"_32"
