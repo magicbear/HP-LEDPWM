@@ -18,6 +18,12 @@
 #include <AutoPID.h>
 #include "config.h"
 
+#if defined(ARDUINO_ESP8266_GENERIC)
+  #warning "BOARD: ESP8266, please confirm using 4M with 1M SPIFFS"
+#elif defined(ARDUINO_ESP8266_ESP01)
+  #warning "BOARD: ESP8285, please confirm using 1M with no SPIFFS"
+#endif
+
 // CONFIG: REVERSE THE OUTPUT FOR MOSFET+BJT Driver
 // config.work_mode = 2: USING SCR to OUTPUT
 /*
@@ -43,13 +49,11 @@ scr_timing_t executeTiming, pendingTiming;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define _VERSION "2.5"
+#define VERSION "2.51"
 
 #ifdef ARDUINO_ARCH_ESP32
-#define VERSION _VERSION"_32"
 #define timer1_write(value) if (timer != NULL) { timerWrite(timer, 5000000 - value); timerAlarmEnable(timer); }
 #else
-#define VERSION _VERSION
   #define PWM_CHANNELS 2
   // PWM setup (choice all pins that you use PWM)
   uint32 io_info[PWM_CHANNELS][3];
@@ -194,6 +198,7 @@ const hp_cfg_t def_cfg[] = {
     {210, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
     {230, 0, (uint8_t)0, &mqtt_server, true, "mqtt_srv"},        // STRING: MQTT SERVER
     {250, sizeof(uint16_t), (uint16_t)1234, &port, true, "mqtt_port"},             // UINT16: PORT
+    {NULL, 0,0, NULL, false, NULL}
 };
 
 double sensor_bright;
@@ -747,12 +752,6 @@ void inline enableInterrupts()
   }
 }
 
-//
-//void ESP_delayMicroseconds(uint32_t us){
-//  uint32_t start = micros();
-//  while(micros() - start < us){ yield(); }
-//}
-
 void setup() {
   uint16_t boot_count = 0;
 #ifdef DEBUG_TRIGGER_PIN
@@ -772,6 +771,7 @@ void setup() {
 #elif ARDUINO_ARCH_ESP32
   int resetCode = rtc_get_reset_reason(0);
 #endif
+  // ESP_RST_BROWNOUT
 
   memset(&executeTiming, 0, sizeof(scr_timing_t));
   memset(&pendingTiming, 0, sizeof(scr_timing_t));
@@ -783,10 +783,18 @@ void setup() {
   }
   if (config.reversion != 1)
   {
-      // Migrate from Old Version
+      // Migrate from Old Version ** NOT FOR NVS **
+      Serial.printf("Migrate from Old Config Reversion: %d\n", config.reversion);
       cfg_load(old_def_cfg);
       config.reversion = def_cfg[0].data.uint8;
+      Serial.printf("Migrated config Reversion: %d\n", config.reversion);
+#ifdef ARDUINO_ARCH_ESP8266
+      // Migrate from old 16 bits to 32 bits
+      config.pwm_freq = config.pwm_freq & 0xffff;
+#endif
       CFG_SAVE();
+      cfg_load(def_cfg);
+      Serial.printf("Migrated config Reversion: %d\n", config.reversion);
   }
   if (config.pwm_freq == 0 || config.pwm_period == 0)
   {
@@ -931,9 +939,11 @@ void setup() {
   Serial.printf("Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
 #elif ARDUINO_ARCH_ESP32
   Serial.printf("Reset Reason: %d\n", resetCode);
+//  Serial.printf("RTC Reset Reason: %d\n", rtc_get_reset_reason());
   Serial.printf("CPU Speed: %d MHz  XTAL: %d MHz  APB: %d Hz\n", getCpuFrequencyMhz(), getXtalFrequencyMhz(), getApbFrequency());
 #endif
   Serial.printf("Version: %s\n", VERSION);
+  Serial.printf("Board: %s\n", ARDUINO_BOARD);
   Serial.printf("Build Date: %s %s\n", __DATE__, __TIME__);
   Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
 
@@ -978,10 +988,14 @@ void setup() {
     while (Serial.available())
     {
       char ch = Serial.read();
-      if (ch == 'R' && Serial.read() == 'r') {
-          Serial.printf("Reset config command from serial.\n");
-          cfg_reset(def_cfg);
-          ESP.restart();
+      if (ch == 'R') {
+          delay(50);
+          if (Serial.read() == 'r')
+          {
+              Serial.printf("Reset config command from serial.\n");
+              cfg_reset(def_cfg);
+              ESP.restart();
+          }
       }
     }
     if (millis() >= 60000)
@@ -1034,7 +1048,7 @@ void sendMeta()
 {
     last_send_meta = millis();
   // max length = 64 - 21
-    char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"%s\"", dev_name);
+    char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"%s\",\"board\":\"%s\"", dev_name, ARDUINO_BOARD);
     p = p + sprintf(p, ",\"pwm_freq\":%d,\"pwm_start\":%d,\"pwm_end\":%d,\"period\":%d,\"en1\":%d,\"en2\":%d,\"adc\":%d,\"ch2mode\":%d}", config.pwm_freq, config.pwm_start, config.pwm_end, config.pwm_period, config.pin_en1, config.pin_en2, config.pin_adc_bright, config.mode_ch2);
     client.publish("dev", msg_buf);
     if (isScrMode)

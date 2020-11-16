@@ -9,6 +9,8 @@
 #endif
 #include "config.h"
 
+//#define CFG_DEBUG
+
 static char *cfg_buffer = NULL;
 enum cfg_storage_backend_t {
     STORAGE_NVS,
@@ -319,6 +321,13 @@ uint16_t boot_count_increase()
         boot_count++;
         f.write((uint8_t *)&boot_count, 2);
         f.close();
+    } else if (cfg_backend == STORAGE_EEPROM)
+    {
+        uint8_t tmp_bootcount = 0;
+        EEPROM.get(255, tmp_bootcount);
+        EEPROM.put(255, tmp_bootcount++);
+        EEPROM.commit();
+        boot_count = tmp_bootcount;
     }
     return boot_count;
 }
@@ -333,7 +342,11 @@ void boot_count_reset()
         boot_count = 0;
         f.write((uint8_t *)&boot_count, 2);
         f.close();
-    }  
+    } else if (cfg_backend == STORAGE_EEPROM)
+    {
+        EEPROM.put(255, 0);
+        EEPROM.commit();
+    }
 }
 
 uint8_t cfg_read_uint8(const hp_cfg_t *def_value, int index)
@@ -580,9 +593,11 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
     for (int i = 0; def_value[i].offset != 0; i++)
     {
         if (def_value[i].assign == NULL) continue;
+        uint32_t storage_value;
         switch (def_value[i].size)
         {
             case 1:
+                storage_value = *(uint8_t *)def_value[i].assign;
                 if (cfg_backend == STORAGE_NVS)
                 {
                     if (*(uint8_t *)(cfg_buffer + def_value[i].offset) == *(uint8_t *)def_value[i].assign && !forceSave) continue;
@@ -599,6 +614,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
                 }
                 break;
             case 2:
+                storage_value = *(uint16_t *)def_value[i].assign;
                 if (cfg_backend == STORAGE_NVS)
                 {
                       if (*(uint16_t *)(cfg_buffer + def_value[i].offset) == *(uint16_t *)def_value[i].assign && !forceSave) continue;
@@ -615,6 +631,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
                 }
                 break;
             case 4:
+                storage_value = *(uint32_t *)def_value[i].assign;
                 if (cfg_backend == STORAGE_NVS)
                 {
                     if (*(uint32_t *)(cfg_buffer + def_value[i].offset) == *(uint32_t *)def_value[i].assign && !forceSave) continue;
@@ -652,6 +669,15 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
                 cfg_write_string(def_value, i, *(char **)def_value[i].assign, def_value[i].size);
                 break;
         }
+#ifdef CFG_DEBUG
+        if (def_value[i].size == 0)
+        {
+//            Serial.printf("Saving %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
+        } else 
+        {
+            Serial.printf("Saving %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
+        }
+#endif
     }
     if (cfg_backend == STORAGE_NVS)
     {
@@ -698,7 +724,7 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
       WiFiClient telnetClient;
 
       telnetServer.begin(23);
-
+ssid_input:
       Serial.print("Please input SSID: ");
       p = ssid;
       chEEP = '\0';
@@ -722,6 +748,12 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
                   {
                       *p--;
                       continue;
+                  }
+                  if (chEEP <= 31 && chEEP != '\r' && chEEP != '\n')
+                  {
+                      telnetClient.printf("Invalid character %d<%c> input, retry input!\n", chEEP, chEEP);
+                      telnetClient.printf("Please input SSID: ");
+                      goto ssid_input;
                   }
                   *p++ = chEEP == '\n' || chEEP == '\r' ? '\0' : chEEP;
               }
@@ -753,6 +785,12 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
                   {
                       *p--;
                       continue;
+                  }
+                  if (chEEP <= 31 && chEEP != '\r' && chEEP != '\n')
+                  {
+                      telnetClient.printf("Invalid character %d<%c> input, retry input!\n", chEEP, chEEP);
+                      telnetClient.printf("Please input SSID: ");
+                      goto ssid_input;
                   }
                   *p++ = chEEP == '\n' || chEEP == '\r' ? '\0' : chEEP;
               }
@@ -864,8 +902,10 @@ void cfg_reset(const hp_cfg_t *def_value)
         nvs_erase_key(nvs, "boot_count");
         for (int i = 0; def_value[i].offset != 0; i++)
         {
+//            Serial.printf("Erase Key: %s\n", def_value[i].nvs_name);
             nvs_erase_key(nvs, def_value[i].nvs_name);
         }
+        nvs_commit(nvs);
         nvs_close(nvs);
 //        nvs_erase_all(nvs);
 #endif
