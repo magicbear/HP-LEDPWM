@@ -12,11 +12,6 @@
 //#define CFG_DEBUG
 
 static char *cfg_buffer = NULL;
-enum cfg_storage_backend_t {
-    STORAGE_NVS,
-    STORAGE_SPIFFS,
-    STORAGE_EEPROM
-};
 static enum cfg_storage_backend_t cfg_backend;
 
 char *dev_name;
@@ -146,6 +141,10 @@ const char *cfg_get_backend()
     }
 }
 
+enum cfg_storage_backend_t cfg_get_backend_t()
+{
+    return cfg_backend;
+}
 
 bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
 {

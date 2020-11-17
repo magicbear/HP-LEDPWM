@@ -14,6 +14,12 @@ extern char *password;
 extern char *mqtt_server;//服务器的地址
 extern uint16_t port;//服务器端口号 
 
+enum cfg_storage_backend_t {
+    STORAGE_NVS,
+    STORAGE_SPIFFS,
+    STORAGE_EEPROM
+};
+
 typedef struct hp_cfg {
     int offset;  /*!< offset for config buffer */
     int size;    /*!< offset for config variable size (1: uint8, 2:uint16, 4: uint32, 0: string, other: blob) */
@@ -89,6 +95,7 @@ bool cfg_spiffs();
  *             - string for the backend using
  */
 const char *cfg_get_backend();
+enum cfg_storage_backend_t cfg_get_backend_t();
 
 /**@{*/
 /**
