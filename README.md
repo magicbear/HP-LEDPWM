@@ -14,6 +14,13 @@ Protocol: MQTT
 - Start/End Range for bright contorl
 - Smooth Bright / Color Temperature Change
 - Auto save Bright / Color Temperature and will smooth startup
+- Constant Bright Control by LDR (Photoresisotr)
+- Remote adjustable ADC calibration
+- Remote adjustable LDR cal
+- Realtime PID status output on web
+- Adjustable SCR pre-release
+- SCR Zero-crossing filter to prevent mis-trigger
+- Adjustable SCR startup delay to support RC network zero-crossing
 
 ## Demo MQTT Server
 https://github.com/magicbear/HP-MQTTServer
@@ -26,3 +33,7 @@ https://github.com/magicbear/HP-MQTTServer
 
 ## Video Demo
 https://www.bilibili.com/video/av58690546/
+
+## Depend Arduino Libraries
+- PubSubClient
+- AutoPID

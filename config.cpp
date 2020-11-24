@@ -513,22 +513,26 @@ bool cfg_load(const hp_cfg_t *def_value)
     for (int i = 0; def_value[i].offset != 0; i++)
     {
         if (def_value[i].assign == NULL) continue;
+        uint32_t storage_value;
         switch (def_value[i].size)
         {
             case 1:
                 *(uint8_t *)def_value[i].assign = cfg_read_uint8(def_value, i);
+                storage_value = *(uint8_t *)def_value[i].assign;
                 if (cfg_backend == STORAGE_NVS) {
                     *(uint8_t *)(cfg_buffer + def_value[i].offset) = *(uint8_t *)def_value[i].assign;
                 }
                 break;
             case 2:
                 *(uint16_t *)def_value[i].assign = cfg_read_uint16(def_value, i);
+                storage_value = *(uint16_t *)def_value[i].assign;
                 if (cfg_backend == STORAGE_NVS) {
                     *(uint16_t *)(cfg_buffer + def_value[i].offset) = *(uint16_t *)def_value[i].assign;
                 }
                 break;
             case 4:
                 *(uint32_t *)def_value[i].assign = cfg_read_uint32(def_value, i);
+                storage_value = *(uint32_t *)def_value[i].assign;
                 if (cfg_backend == STORAGE_NVS) {
                     *(uint32_t *)(cfg_buffer + def_value[i].offset) = *(uint32_t *)def_value[i].assign;
                 }
@@ -560,6 +564,15 @@ bool cfg_load(const hp_cfg_t *def_value)
                 }
                 break;
         }
+#ifdef CFG_DEBUG
+        if (def_value[i].size == 0)
+        {
+            Serial.printf("Loading %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
+        } else 
+        {
+            Serial.printf("Loading %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
+        }
+#endif
     }
 #ifdef ESP_NVS_H
     if (cfg_backend == STORAGE_NVS)
@@ -671,7 +684,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
 #ifdef CFG_DEBUG
         if (def_value[i].size == 0)
         {
-//            Serial.printf("Saving %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
+            Serial.printf("Saving %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
         } else 
         {
             Serial.printf("Saving %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);

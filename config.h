@@ -22,8 +22,9 @@ enum cfg_storage_backend_t {
 
 typedef struct hp_cfg {
     int offset;  /*!< offset for config buffer */
-    int size;    /*!< offset for config variable size (1: uint8, 2:uint16, 4: uint32, 0: string, other: blob) */
+    int size;    /*!< offset for config variable size (1: uint8, 2:uint16, 4: uint32/float, 0: string, other: blob) */
     union {
+      float    f;
       uint32_t uint32;
       uint16_t uint16;
       uint8_t  uint8;

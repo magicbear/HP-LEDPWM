@@ -7,6 +7,7 @@
   #include <rom/rtc.h>
   #include <esp_task_wdt.h>
   #include <esp32-hal-timer.c>
+  #include <esp32-hal-adc.h>
   #define ESPhttpUpdate httpUpdate
 #elif ARDUINO_ARCH_ESP8266
   #include <ESP8266WiFi.h>
@@ -46,12 +47,12 @@ typedef struct {
 scr_timing_t executeTiming, pendingTiming;
 
 #define DEBUG_LEVEL 2
-//#define DEBUG_TRIGGER_PIN 33
-#define DEBUG_SAVE_PIN 33
+#define DEBUG_TRIGGER_PIN 33
+//#define DEBUG_SAVE_PIN 33
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "2.51"
+#define VERSION "2.53"
 
 #ifdef ARDUINO_ARCH_ESP8266
   #define PWM_CHANNELS 2
@@ -66,6 +67,7 @@ scr_timing_t executeTiming, pendingTiming;
 
 bool save_config = true;
 bool ignoreOutput = false;
+bool realtime_data = false;
 
 // Current Bright in PWM Range (正比)
 int scr_current_bright = 0;
@@ -77,8 +79,6 @@ uint32_t zc_interval = 0;
 uint32_t zc_last = 0;
 uint32_t last_zc_interval = 0;
 
-int retry_failed_count = 0;
-
 char mqtt_cls[sizeof(MQTT_CLASS) + 13];
 char msg_buf[160];
 
@@ -88,6 +88,7 @@ hw_timer_t *timer = NULL;
 // ICACHE_RAM FOR timerWrite(5000000-value); timerAlarmEnable(timer);
 #endif
 
+// NOTICE: NAME not longer then 15 bytes
 typedef __attribute__((__packed__)) struct {
     uint8_t  reversion;   // Config
     uint8_t  bright;
@@ -117,14 +118,33 @@ typedef __attribute__((__packed__)) struct {
     int32_t  KP;
     int32_t  KI;
     int32_t  KD;
+    uint32_t sensor_ref_r1;
+    uint16_t sensor_ref;    // 2.495 multiple 1000
+    uint16_t adc_volt_0db;
+    uint16_t adc_volt_6db;
+    uint16_t adc_volt_11db;
+    float    sensor_ax; // y = ax*pow(x,b)
+    float    sensor_b;
 } conf_t;
 //  __attribute__ ((aligned (2)))
+
+#define KP_DIV 1000.
+#define KI_DIV 1000.
+#define KD_DIV 1000.
+
 
 conf_t config;
 #define AUTO_CONF(conf_name, default_value, init) { 32 + offsetof(conf_t, conf_name), sizeof(config.conf_name), (__typeof(config.conf_name))default_value,  &config.conf_name, init, #conf_name }
 #define AUTO_CONF_INT_COMMAND(topic, cmd, field, action)  else if (strcmp(topic, cmd) == 0) { \
   payload[length] = 0; \
   config.field = atoi((char *)payload); \
+  cfg_save(def_cfg); \
+  sendMeta(); \
+  action; \
+}
+#define AUTO_CONF_FLOAT_COMMAND(topic, cmd, field, action)  else if (strcmp(topic, cmd) == 0) { \
+  payload[length] = 0; \
+  config.field = atof((char *)payload); \
   cfg_save(def_cfg); \
   sendMeta(); \
   action; \
@@ -192,9 +212,16 @@ const hp_cfg_t def_cfg[] = {
     AUTO_CONF(scr_prerelease, -50, false),
     AUTO_CONF(pin_sensor, 0, false),
     AUTO_CONF(max_lm, 1000, false),
-    AUTO_CONF(KP, 120, false), // div by 1000
-    AUTO_CONF(KI, 300, false), // div by 1000000
-    AUTO_CONF(KD, 0, false),   // div by 1000000
+    AUTO_CONF(KP, 100, false),
+    AUTO_CONF(KI, 1500, false),
+    AUTO_CONF(KD, 800, false),
+    AUTO_CONF(sensor_ref_r1, 10000, false),
+    AUTO_CONF(sensor_ref, 2495, false),
+    AUTO_CONF(adc_volt_0db, 1100, false),
+    AUTO_CONF(adc_volt_6db, 2000, false),
+    AUTO_CONF(adc_volt_11db, 3600, false),
+    AUTO_CONF(sensor_ax, 6e+08f, false),
+    AUTO_CONF(sensor_b, -1.898f, false),
     {140, 0, (uint8_t)0, &dev_name, true, "name"},                    // STRING: name
     {178, 0, (uint8_t)0, &ssid, true, "ssid"},                    // STRING: SSID
     {210, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
@@ -207,6 +234,7 @@ double sensor_bright;
 double target_bright;
 double pidBright;
 AutoPID pidControl(&sensor_bright, &target_bright, &pidBright, 0, 100, config.KP / 1000., config.KI / 1000000., config.KD / 1000000.);
+
 
 #define STARTUP_SMOOTH_EXECUTE updatePWMValue((last_set_state - (float)(last_set_state - config.bright) * (millis() - last_state_hold) / config.startup_smooth), config.mode_ch2 == 0 ? config.ct_abx : (last_ct_abx - (float)(last_ct_abx - config.ct_abx) * (millis() - last_state_hold) / config.startup_smooth));
 #define isScrMode (config.work_mode == 2 || config.work_mode == 3 || config.work_mode == 4)
@@ -449,7 +477,7 @@ void updatePWMValue(float set_state, float ct_abx)
         }
         
     #if DEBUG_LEVEL >= 2
-        if (!ignoreOutput)
+        if (!ignoreOutput && (config.pin_sensor == 0 || config.max_lm == 0))
         {
             if (config.mode_ch2 == 0)
             {
@@ -517,7 +545,7 @@ void updatePWMValue(float set_state, float ct_abx)
             scr_current_bright = pwm_state;
         }
         #if DEBUG_LEVEL >= 2
-        if (!isScrMode && !ignoreOutput)
+        if (!isScrMode && !ignoreOutput && (config.pin_sensor == 0 || config.max_lm == 0))
             Serial.printf("Set Power Power %f  => %d\n", set_state, pwm_state);
         #endif
     }
@@ -564,13 +592,6 @@ bool ICACHE_RAM_ATTR timerMarkNextTick(uint32_t currentMicro)
     // Checking for overflow micros
     if (nextTick <= 5000000)  // nextTick != 0xffffffff && 
     {
-//        if (nextTick >= 2000)
-//        {
-//            inTrigger = 0;
-//        } else 
-//        {
-//            inTrigger = 1;
-//        }
         timer1_write(5 * (nextTick));
         return true;
     } else if (memcmp(&executeTiming, &pendingTiming, sizeof(scr_timing_t)) != 0) {
@@ -580,6 +601,8 @@ bool ICACHE_RAM_ATTR timerMarkNextTick(uint32_t currentMicro)
     return false;
 }
 
+static uint32_t lastSCROpenTiming = 0;
+
 void ICACHE_RAM_ATTR onTimerISR(){
     uint32_t  currentMicro = micros();
     bool matched = false;
@@ -587,6 +610,7 @@ void ICACHE_RAM_ATTR onTimerISR(){
     {
         matched = true;
         executeTiming.scr1_open = 0;
+        lastSCROpenTiming = currentMicro;
         updateSCRState(true, config.pin_ch1); // 打开SCR
     }
     if (executeTiming.scr1_close != 0 && currentMicro >= executeTiming.scr1_close)
@@ -599,6 +623,7 @@ void ICACHE_RAM_ATTR onTimerISR(){
     {
         matched = true;
         executeTiming.scr2_open = 0;
+        lastSCROpenTiming = currentMicro;
         updateSCRState(true, config.pin_ch2); // 打开SCR
     }
     if (executeTiming.scr2_close != 0 && currentMicro >= executeTiming.scr2_close)
@@ -681,10 +706,15 @@ void ICACHE_RAM_ATTR calcSCRTiming(uint32_t currentMicro)
 
 void ICACHE_RAM_ATTR ZC_detect()
 {
+    uint32_t currentMicro = micros();
+    if (currentMicro - lastSCROpenTiming <= 100 && (executeTiming.scr1_close == 0 || executeTiming.scr1_close - currentMicro >= 100) && (executeTiming.scr2_close == 0 || executeTiming.scr2_close - currentMicro >= 100)) // less then 20us
+    {
+//        Serial.printf("Surge Detected\n");
+        return;
+    }
 #ifdef DEBUG_TRIGGER_PIN
     digitalWrite(DEBUG_TRIGGER_PIN, HIGH);
 #endif
-    uint32_t currentMicro = micros();
     inTrigger = 1;
     if (zc_interval == 0)
     {
@@ -754,7 +784,6 @@ void inline enableInterrupts()
           attachInterrupt(config.pin_scr_trig, ZC_detect, CHANGE);       // Enable external interrupt (INT0)
       }
 //      pinMode(config.pin_ch1, 
-//      if (IN_STARTUP)
       {
           if (config.work_mode == 2 || config.work_mode == 3 || config.work_mode == 4) {
 #if ARDUINO_ARCH_ESP8266
@@ -852,6 +881,7 @@ void setup() {
           config.pin_en1 = 0;
           config.pin_en2 = 0;
           config.pin_scr_trig = 5;
+          config.pin_sensor = 32;
           CFG_SAVE();
       } else if (digitalRead(34) == HIGH)
       {
@@ -972,7 +1002,7 @@ void setup() {
 #endif
   Serial.printf("Version: %s\n", VERSION);
   Serial.printf("Board: %s\n", ARDUINO_BOARD);
-  Serial.printf("Build Date: %s %s\n", __DATE__, __TIME__);
+  Serial.printf("Build Date: %s %s  CFG SIZE: %d\n", __DATE__, __TIME__, sizeof(conf_t));
   Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
 
   startupWifiConfigure(def_cfg, msg_buf, sizeof(msg_buf), mqtt_cls);
@@ -995,7 +1025,8 @@ void setup() {
   }
 
   enableInterrupts();
-  
+
+#ifdef ARDUINO_ARCH_ESP8266
   Serial.print("Connecting to WiFi");
   uint32_t last_print_dot = millis();
   while (WiFi.status() != WL_CONNECTED) {
@@ -1039,6 +1070,9 @@ void setup() {
     }
     yield();
   }
+  Serial.printf("\n");
+
+#endif
   while (last_state_hold != 0 && millis() - last_state_hold < config.startup_smooth)
   {
       STARTUP_SMOOTH_EXECUTE;
@@ -1048,12 +1082,6 @@ void setup() {
   ignoreOutput = false;
   last_state_hold = 0;
   
-  Serial.printf("\n");
-
-  IPAddress myAddress = WiFi.localIP();
-  Serial.printf("Connected to wifi. My address: ");
-  Serial.print(myAddress);
-  Serial.printf("\nConnecting to %s:%d ", mqtt_server, port);
 ////  WiFi.setSleepMode(WIFI_LIGHT_SLEEP, 1000);
   client.setServer((const char *)mqtt_server, port);//端口号
   client.setCallback(callback); //用于接收服务器接收的数据
@@ -1062,14 +1090,13 @@ void setup() {
   {
       digitalWrite(LED_BUILTIN, HIGH);    
   }
-  
+
   // if luminous is more than 500 lx degrees below or above setpoint, OUTPUT will be set to min or max respectively
-  pidControl.setBangBang(500);
+//  pidControl.setBangBang(15000);
   //set PID update interval to 100ms
   pidControl.setTimeStep(100);
-//  IN_STARTUP = false;
-//  disableInterrupts();
-//  enableInterrupts();
+  pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV);
+  pidControl.reset();
 }
 
 void sendMeta()
@@ -1082,7 +1109,12 @@ void sendMeta()
     if (isScrMode)
     {
         p = msg_buf + sprintf(msg_buf, "{\"scr_delay\":%d,\"trigger_pin\":%d,\"prerelease\":%d}", config.scr_delay, config.pin_scr_trig, config.scr_prerelease);
-        client.publish("dev", msg_buf);        
+        client.publish("dev", msg_buf);
+    }
+//    if (config.pin_sensor != 0)
+    {
+        p = msg_buf + sprintf(msg_buf, "{\"sensor_pin\":%d,\"max_lm\":%d,\"kp\":%ld,\"ki\":%ld,\"kd\":%ld,\"ref\":\"%d,%d\",\"adcref\":\"%d,%d,%d\",\"ax\":%f,\"b\":%f}", config.pin_sensor, config.max_lm, config.KP, config.KI, config.KD, config.sensor_ref, config.sensor_ref_r1, config.adc_volt_0db, config.adc_volt_6db, config.adc_volt_11db, config.sensor_ax, config.sensor_b);
+        client.publish("dev", msg_buf);
     }
     
     p = msg_buf + sprintf(msg_buf, "{\"pin\":%d,\"wpin\":%d,\"pwm_src\":%d, \"duty\":%d,\"mode\":%d,\"cfg_pin\":%d,\"auto_full_power\":%d,\"no_autosave\":%d,\"startup_smooth\":%d}", config.pin_ch1, config.pin_ch2, config.pwm_src, config.pwm_src_duty, config.work_mode, config.pin_reset, config.auto_fp, config.autosave, config.startup_smooth);
@@ -1100,7 +1132,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     {
         last_set_state = config.bright;
         last_ct_abx = config.ct_abx;
-        inSmooth = true;
+        inSmooth = (config.pin_sensor == 0 || config.max_lm == 0);
     } else {
         last_set_state = last_set_state - (float)(last_set_state - config.bright) * (millis() - last_state_hold) / SMOOTH_INTERVAL;
         last_ct_abx = last_ct_abx - (float)(last_ct_abx - config.ct_abx) * (millis() - last_state_hold) / SMOOTH_INTERVAL;
@@ -1144,13 +1176,16 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
     {
         inSmooth = false;
         Serial.print("Ignore: ");
-        updatePWMValue(config.bright, config.ct_abx);
+        inSmooth = true;
+        last_state_hold = 0;
     } else if (!inSmooth)
     {
         Serial.print("DIRECT: ");
-        updatePWMValue(config.bright, config.ct_abx);
+        inSmooth = true;
+        last_state_hold = 0;
+    } else {
+        last_state_hold = millis();
     }
-    last_state_hold = millis();
     last_state = -1;
     return;
   }
@@ -1322,6 +1357,9 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   } else if (strcmp(topic, "reboot") == 0)
   {
       rebootSystem();
+  } else if (strcmp(topic, "toggle_realtime") == 0)
+  {
+      realtime_data = !realtime_data;
   }
   AUTO_CONF_INT_COMMAND(topic, "set_config_pin", pin_reset, )
   AUTO_CONF_INT_COMMAND(topic, "set_autosave", autosave, )
@@ -1336,36 +1374,54 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   AUTO_CONF_INT_COMMAND(topic, "set_auto_full_power", auto_fp, inSmooth = true; last_state_hold = 0)
   AUTO_CONF_INT_COMMAND(topic, "set_scr_prerelease", scr_prerelease, )
   AUTO_CONF_INT_COMMAND(topic, "set_startup_smooth", startup_smooth, )
+  AUTO_CONF_INT_COMMAND(topic, "set_sensor_pin", pin_sensor, inSmooth = true; last_state_hold = 0)
+  AUTO_CONF_INT_COMMAND(topic, "set_max_lm", max_lm, inSmooth = true; last_state_hold = 0)
+  AUTO_CONF_INT_COMMAND(topic, "set_kp", KP, pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV); pidControl.reset())
+  AUTO_CONF_INT_COMMAND(topic, "set_ki", KI, pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV); pidControl.reset())
+  AUTO_CONF_INT_COMMAND(topic, "set_kd", KD, pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV); pidControl.reset())
+  AUTO_CONF_INT_COMMAND(topic, "set_sensor_ref", sensor_ref, )
+  AUTO_CONF_INT_COMMAND(topic, "set_sensor_ref_r1", sensor_ref_r1, )
+  AUTO_CONF_INT_COMMAND(topic, "set_adc_0db", adc_volt_0db, )
+  AUTO_CONF_INT_COMMAND(topic, "set_adc_6db", adc_volt_6db, )
+  AUTO_CONF_INT_COMMAND(topic, "set_adc_11db", adc_volt_11db, )
+  AUTO_CONF_FLOAT_COMMAND(topic, "set_sensor_ax", sensor_ax, )
+  AUTO_CONF_FLOAT_COMMAND(topic, "set_sensor_b", sensor_b, )
+  
   enableInterrupts();
 }
 
-void reconnect() {//等待，直到连接上服务器
-  uint32_t disconnectTime = 0;
-  if (WiFi.status() != WL_CONNECTED) {
-      disconnectTime = millis();
-  }
-  while (WiFi.status() != WL_CONNECTED) {
-      if (millis() - disconnectTime >= 30000)
+bool reconnect() {//等待，直到连接上服务器
+  static uint32_t disconnectTime = 0;
+  static wl_status_t lastWiFiStatus = WL_NO_SHIELD;
+  static int retry_failed_count = 0;
+
+  if (WiFi.status() != lastWiFiStatus)
+  {
+      if (WiFi.status() != WL_CONNECTED) {
+          disconnectTime = millis();
+      } else 
       {
-          break;
+          disconnectTime = 0;
+          IPAddress myAddress = WiFi.localIP();
+          Serial.printf("Connected to wifi, IP: ");
+          Serial.print(myAddress);
+          Serial.printf("\n");
       }
-      delay(1);
+      lastWiFiStatus = WiFi.status();
   }
-  if (WiFi.status() != WL_CONNECTED) {
-      Serial.printf("WiFi: DISCONNECTED, RESET SYSTEM\n");
+  if (WiFi.status() != WL_CONNECTED && millis() - disconnectTime >= 30000) {
+      Serial.printf("WiFi: Status = %d (Disconnected), RESET SYSTEM\n", WiFi.status());
       rebootSystem();
   }
-  if (!client.connected()){
-      Serial.print("Connecting to MQTT server...");
+  if (WiFi.status() == WL_CONNECTED && !client.connected()){
+      Serial.printf("Connecting to MQTT %s:%d\n", mqtt_server, port);
 #ifdef ARDUINO_ARCH_ESP32
       esp_task_wdt_init(30, true);
       esp_task_wdt_add(NULL);
 #endif
-    while (!client.connected()) {//如果没有连接上
-      Serial.printf(".");
       if (client.connect(mqtt_cls)) {//接入时的用户名，尽量取一个很不常用的用户名
         retry_failed_count = 0;
-        Serial.printf(" success, login by: %s\n",mqtt_cls);
+        Serial.printf("Connect to MQTT success, login by: %s\n",mqtt_cls);
   #ifdef ARDUINO_ARCH_ESP32
         esp_task_wdt_delete(NULL);
         esp_task_wdt_deinit();
@@ -1378,29 +1434,31 @@ void reconnect() {//等待，直到连接上服务器
         esp_task_wdt_reset();
   #endif
         retry_failed_count++;
-        Serial.print(" failed, rc=");//连接失败
-        Serial.print(client.state());//重新连接
-        Serial.printf(" try again in 1 seconds, wifi: %d\n", WiFi.status());//延时5秒后重新连接
+        Serial.printf("Connect failed, rc=%d\n", client.state());//连接失败
         client.disconnect();
         delay(1000);
         if (retry_failed_count >= 10)
         {
             Serial.printf("MQTT: Reconnect Too many times, RESET SYSTEM\n");
             rebootSystem();
-        } else 
-        {
-          Serial.print("Connecting to MQTT server");
         }
       }
-    }
   }
+  return WiFi.status() == WL_CONNECTED && client.connected();
 }
 
+int uint16_cmpfunc (const void * a, const void * b) {
+   return ( *(uint16_t*)a - *(uint16_t*)b );
+}
+
+#include <EEPROM.h>
 int buflen = 0;
 void loop() {
-   hasPacket = false;
-   if (ZC)
-   {
+    uint32_t currentMillis = millis();
+    static uint32_t lastSensorDetect = 0;
+    hasPacket = false;
+    if (ZC)
+    {
         ZC = 0;
         if (abs(zc_interval - last_zc_interval) >= 1000)
         {
@@ -1409,9 +1467,9 @@ void loop() {
 #endif
             last_zc_interval = zc_interval;
         }
-   }
-   while (Serial.available())
-   {
+    }
+    while (Serial.available())
+    {
       char ch = Serial.read();
       if (ch == 'S')
       {
@@ -1428,36 +1486,33 @@ void loop() {
           cfg_reset(def_cfg);
           ESP.restart();
       }
-   }
-    if (!bootCountReset && millis() - boot_time >= 5000)
+    }
+    if (!bootCountReset && currentMillis - boot_time >= 5000)
     {
         bootCountReset = true;
         disableInterrupts();
         boot_count_reset();
         enableInterrupts();
     }
-   reconnect();//确保连上服务器，否则一直等待。
-   client.loop();//MUC接收数据的主循环函数。
-   long rssi = WiFi.RSSI();
-   if (SMOOTH_INTERVAL == 0)
-   {
+    if (SMOOTH_INTERVAL == 0)
+    {
       SMOOTH_INTERVAL = 200;
-   }
-   if (inSmooth && last_state_hold != 0 && millis() - last_state_hold <= SMOOTH_INTERVAL && config.bright != -1)
-   {
+    }
+    if (inSmooth && last_state_hold != 0 && currentMillis - last_state_hold <= SMOOTH_INTERVAL && config.bright != -1)
+    {
       if (!isScrMode)
         Serial.print("Smooth: ");
-      updatePWMValue((last_set_state - (float)(last_set_state - config.bright) * (millis() - last_state_hold) / SMOOTH_INTERVAL), (last_ct_abx - (float)(last_ct_abx - config.ct_abx) * (millis() - last_state_hold) / SMOOTH_INTERVAL));
-   }
-   if (inSmooth && millis() - last_state_hold > SMOOTH_INTERVAL && config.bright != -1)
-   {
+      updatePWMValue((last_set_state - (float)(last_set_state - config.bright) * (currentMillis - last_state_hold) / SMOOTH_INTERVAL), (last_ct_abx - (float)(last_ct_abx - config.ct_abx) * (currentMillis - last_state_hold) / SMOOTH_INTERVAL));
+    }
+    if (inSmooth && currentMillis - last_state_hold > SMOOTH_INTERVAL && config.bright != -1)
+    {
       if (!isScrMode)
         Serial.print("Final: ");
       updatePWMValue(config.bright, config.ct_abx);
       inSmooth = false;
-   }
-   if (last_state_hold != 0 && (config.bright > 0 || (config.mode_ch2 == 1 && config.ct_abx > 0)) && !inSmooth && !inTrigger && millis() - last_state_hold >= 2000)
-   {
+    }
+    if (last_state_hold != 0 && (config.bright > 0 || (config.mode_ch2 == 1 && config.ct_abx > 0)) && !inSmooth && !inTrigger && currentMillis - last_state_hold >= 2000)
+    {
       if (save_config) {
 #ifdef DEBUG_SAVE_PIN
         digitalWrite(DEBUG_SAVE_PIN, HIGH);
@@ -1480,28 +1535,9 @@ void loop() {
 #endif
       }
       last_state_hold = 0;
-   }
-   if (last_state != config.bright || (abs(rssi - last_rssi) >= 3 && millis() - last_send_rssi >= 5000))
-   {
-      last_send_rssi = millis();
-      last_state = config.bright;
-      last_rssi = rssi;
-      if (config.pin_ch2 != 0)
-      {
-          if (config.mode_ch2 == 0)
-          {
-              sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, millis());
-          } else 
-          {
-              sprintf(msg_buf, "{\"bright\":%d,\"bright2\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, millis());
-          }
-      } else {
-          sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, rssi, VERSION, millis());
-      }
-      client.publish("status", msg_buf);
-   }
-   if (config.pin_adc_bright != 0)
-   {
+    }
+    if (config.pin_adc_bright != 0)
+    {
 //      analogSetAttenuation(ADC_11db);
       int16_t new_adc_value = analogRead(config.pin_adc_bright);
       if (abs(new_adc_value - lastAdcValue) > 4096/20)
@@ -1516,22 +1552,108 @@ void loop() {
             callback("set_bright", (byte *)msg_buf, strlen(msg_buf));
         }
       }
-   }
-   if (config.pin_sensor != 0)
-   {
-//      analogSetPinAttenuation(config.pin_sensor, ADC_ATTEN_11db);
-      uint16_t sensor_adc = analogRead(config.pin_sensor);
-      sensor_bright = sensor_adc / 4095. * config.max_lm;
-      target_bright = config.bright / 100. * config.max_lm;
-      pidControl.run();
-      updatePWMValue(pidBright, config.mode_ch2 == 0 ? config.ct_abx : pidBright * config.ct_abx / 100.);
-//      if (sensor_adc >= 
-   }
+    }
+    if (config.pin_sensor != 0 && config.max_lm != 0 && (currentMillis - lastSensorDetect >= 100 || currentMillis < lastSensorDetect))
+    {
+      // Resistor Side
+      // Imax = (2.495)/100000 ~= 24.95uA
+      // Rmax(sensor) = 3.3/Imax - 100000 ~= 66498
+      // Vsensor = Imax*R
+      // Rsensor = Vsensor / Imax
+      // Rsensor ＝Vsensor / 10 / Imax
+      // OpAmp Non-Inv
+      // Isensor = 2.495 / (100000 + Rsensor)
+      // Vsensor = Isensor * Rsense
+      // Rsensor(LowSide) = (Vsensor / Gain * 100000) / (2.495 - Vsensor / Gain)
+      // Rsensor(HighSide) = (2.495 * R2 - Vsensor * R2) / Vsensor
 
-   if (millis() - last_send_meta >= 60000)
-   {
-      if (!isScrMode)
-          Serial.printf("PING %ld  WiFI: %d\n", millis(), WiFi.status());
-      sendMeta();
-   }
+      uint16_t *adcVoltageRange;
+      adcVoltageRange = &config.adc_volt_11db;
+      analogSetPinAttenuation(config.pin_sensor, ADC_11db);      
+      if (analogRead(config.pin_sensor) <= 1100)
+      {
+          adcVoltageRange = &config.adc_volt_0db;
+          analogSetPinAttenuation(config.pin_sensor, ADC_0db);
+      } else if (analogRead(config.pin_sensor) <= 2200)
+      {
+          adcVoltageRange = &config.adc_volt_6db;
+          analogSetPinAttenuation(config.pin_sensor, ADC_6db);
+      }
+      bool calibrateMode = (*adcVoltageRange & 0x8000) == 0x8000;
+      uint32_t sensor_adc = 0;
+      uint16_t sensor_adcValues[32];
+      for (int i = 0; i < 32; i++)
+      {
+          sensor_adcValues[i] = analogRead(config.pin_sensor);
+      }
+      qsort(sensor_adcValues, 32, sizeof(uint16_t), uint16_cmpfunc);
+      for (int i = 8; i < 24; i++)
+      {
+          sensor_adc += sensor_adcValues[i];
+      }
+      sensor_adc >>= 3;
+      if (calibrateMode)
+      {
+          Serial.printf("In Calibrate Mode, full range = %d\n", (int)((*adcVoltageRange & 0x7fff) * 8191. / sensor_adc));
+          *adcVoltageRange = (*adcVoltageRange & 0x7fff) * 8191. / sensor_adc;
+          if (cfg_get_backend_t() == STORAGE_NVS)
+          {
+              cfg_save(def_cfg, true);
+          } else {
+              disableInterrupts();
+              cfg_save(def_cfg, true);
+              enableInterrupts();
+          }
+          sendMeta();
+      }
+      float voltageRange = (*adcVoltageRange & 0x7fff) / 1000.;
+      
+      sensor_bright = (8191-sensor_adc * (voltageRange / 3.6)) / 8191. * 100;
+      target_bright = config.bright;
+      float Vsensor = (sensor_adc / 8191. * voltageRange);
+      float Rsensor = (config.sensor_ref/1000. * config.sensor_ref_r1 - Vsensor * config.sensor_ref_r1) / Vsensor;
+      float lumen = config.sensor_ax * pow(Rsensor, config.sensor_b);
+      sensor_bright = lumen / config.max_lm * 100;
+      if (sensor_bright >= 100) sensor_bright = 100;
+      target_bright = config.bright;
+      pidControl.run();
+
+      if (realtime_data){
+          sprintf(msg_buf, "{\"current_bright\":%f,\"action\":%f,\"lumen\":%f,\"target_lumen\":%f,\"adc_voltage\":%f,\"resistor\":%f}", sensor_bright, pidBright, lumen,config.bright/100.*config.max_lm,Vsensor, Rsensor);
+          client.publish("callback", msg_buf);
+      }
+      
+//      (vSensor/11 * 100000)/(2.495 - vSensor / 11));
+      updatePWMValue(pidBright, config.mode_ch2 == 0 ? config.ct_abx : pidBright * config.ct_abx / 100.);
+      lastSensorDetect = currentMillis;
+    }
+    if (reconnect()) {//确保连上服务器，否则一直等待。
+      client.loop();//MUC接收数据的主循环函数。
+      long rssi = WiFi.RSSI();
+       if (last_state != config.bright || (abs(rssi - last_rssi) >= 3 && currentMillis - last_send_rssi >= 5000))
+       {
+          last_send_rssi = currentMillis;
+          last_state = config.bright;
+          last_rssi = rssi;
+          if (config.pin_ch2 != 0)
+          {
+              if (config.mode_ch2 == 0)
+              {
+                  sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, currentMillis);
+              } else 
+              {
+                  sprintf(msg_buf, "{\"bright\":%d,\"bright2\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, currentMillis);
+              }
+          } else {
+              sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, rssi, VERSION, currentMillis);
+          }
+          client.publish("status", msg_buf);
+       }
+       if (currentMillis - last_send_meta >= 60000)
+       {
+          if (!isScrMode)
+              Serial.printf("PING %ld  WiFI: %d\n", currentMillis, WiFi.status());
+          sendMeta();
+       }
+    }
 }
