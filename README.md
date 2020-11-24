@@ -26,10 +26,15 @@ Protocol: MQTT
 https://github.com/magicbear/HP-MQTTServer
 
 ## Diagram
+### DC Buck Version
 ![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWM/master/sch.png)
 
 ## PCB
+### DC Buck Version
 ![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWM/master/top.svg)
+
+### SCR Version
+![Diagram](https://raw.githubusercontent.com/magicbear/HP-LEDPWM/master/scr-sch.png)
 
 ## Video Demo
 https://www.bilibili.com/video/av58690546/
