@@ -134,7 +134,8 @@ typedef __attribute__((__packed__)) struct {
 
 
 conf_t config;
-#define AUTO_CONF(conf_name, default_value, init) { 32 + offsetof(conf_t, conf_name), sizeof(config.conf_name), (__typeof(config.conf_name))default_value,  &config.conf_name, init, #conf_name }
+#define AUTO_CONF(conf_name, default_value, init) { 32 + offsetof(conf_t, conf_name), sizeof(config.conf_name), default_value,  &config.conf_name, init, #conf_name }
+#define AUTO_CONF_FLOAT(conf_name, default_value, init) { 32 + offsetof(conf_t, conf_name), sizeof(config.conf_name), {.f=default_value},  &config.conf_name, init, #conf_name }
 #define AUTO_CONF_INT_COMMAND(topic, cmd, field, action)  else if (strcmp(topic, cmd) == 0) { \
   payload[length] = 0; \
   config.field = atoi((char *)payload); \
@@ -150,7 +151,7 @@ conf_t config;
   action; \
 }
 
-  
+#ifdef MIGRATE_ENABLED
 const hp_cfg_t old_def_cfg[] = {
   {31, sizeof(uint8_t), (uint8_t)10,      &config.bright, true, "bright"},        // BRIGHT
   {32, 0, (uint8_t)0, &dev_name, true, "name"},                    // NAME LENGTH
@@ -185,6 +186,7 @@ const hp_cfg_t old_def_cfg[] = {
   {192, sizeof(uint16_t), (uint16_t)1234, &port, true, "mqtt_port"},             // UINT16: PORT
   {NULL, 0,0, NULL, false, NULL}
 };
+#endif
 
 const hp_cfg_t def_cfg[] = {
     AUTO_CONF(reversion, 1, false),
@@ -220,9 +222,9 @@ const hp_cfg_t def_cfg[] = {
     AUTO_CONF(adc_volt_0db, 1100, false),
     AUTO_CONF(adc_volt_6db, 2000, false),
     AUTO_CONF(adc_volt_11db, 3600, false),
-    AUTO_CONF(sensor_ax, 6e+08f, false),
-    AUTO_CONF(sensor_b, -1.898f, false),
-    {140, 0, (uint8_t)0, &dev_name, true, "name"},                    // STRING: name
+    AUTO_CONF_FLOAT(sensor_ax, 6e+08f, false),
+    AUTO_CONF_FLOAT(sensor_b, -1.898f, false),
+    {140, 0, {.uint8=0}, &dev_name, true, "name"},                    // STRING: name
     {178, 0, (uint8_t)0, &ssid, true, "ssid"},                    // STRING: SSID
     {210, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
     {230, 0, (uint8_t)0, &mqtt_server, true, "mqtt_srv"},        // STRING: MQTT SERVER
@@ -839,6 +841,7 @@ void setup() {
   {
       CFG_INIT(true);
   }
+#ifdef MIGRATE_ENABLED
   if (config.reversion != 1)
   {
       // Migrate from Old Version ** NOT FOR NVS **
@@ -854,6 +857,7 @@ void setup() {
       cfg_load(def_cfg);
       Serial.printf("Migrated config Reversion: %d\n", config.reversion);
   }
+#endif
   if (config.pwm_freq == 0 || config.pwm_period == 0)
   {
       Serial.printf("Invalid PWM Frequence, reset configure\n");

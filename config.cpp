@@ -9,8 +9,6 @@
 #endif
 #include "config.h"
 
-//#define CFG_DEBUG
-
 static char *cfg_buffer = NULL;
 static enum cfg_storage_backend_t cfg_backend;
 
@@ -24,6 +22,7 @@ uint16_t port;//服务器端口号
 
 #ifdef ESP_NVS_H
 nvs_handle nvs;
+#ifdef MIGRATE_ENABLED
 bool cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
 {
     Serial.printf("Migrate Config From SPIFFS to NVS\n");
@@ -49,14 +48,17 @@ bool cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
     return true;
 }
 #endif
+#endif
 
 void cfg_begin()
 {
 #ifdef ARDUINO_ARCH_ESP32
-//    nvs_stats_t nvs_stats;
-//    nvs_get_stats("nvs", &nvs_stats);
-//    Serial.printf("NVS Status: Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)\n",
-//          nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
+#ifdef CFG_DEBUG
+    nvs_stats_t nvs_stats;
+    nvs_get_stats("nvs", &nvs_stats);
+    Serial.printf("NVS Status: Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)\n",
+          nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
+#endif
     int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
     if (rc == ESP_OK)
     {
@@ -170,10 +172,13 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
         }
         if (!checkPass)
         {
+#ifdef MIGRATE_ENABLED
             if (SPIFFS.begin(true) && SPIFFS.exists("/config.bin")) {
               checkPass = cfg_migrate2nvs(mqtt_cls, def_value);
             }
-            else cfg_init(mqtt_cls, def_value, true);
+            else 
+#endif
+            cfg_init(mqtt_cls, def_value, true);
         }
         nvs_close(nvs);
         return checkPass;
@@ -207,7 +212,10 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
     {
 #ifdef ESP_NVS_H
         int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
-        if (rc != ESP_OK) return;
+        if (rc != ESP_OK) {
+            Serial.printf("ERROR: Initalize NVS core failed\n");
+            return;
+        }
         nvs_set_str(nvs, "class", mqtt_cls);
 #endif
     } else if (cfg_backend == STORAGE_SPIFFS)
@@ -222,9 +230,11 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
     for (int i = 0; def_value[i].offset != 0; i++)
     {
         if (!full_init && def_value[i].full_init == full_init) continue;
+        uint32_t storage_value;
         switch (def_value[i].size)
         {
             case 1:
+                storage_value = def_value[i].data.uint8;
                 if (cfg_backend == STORAGE_NVS)
                 {
 #ifdef ESP_NVS_H
@@ -239,6 +249,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
                 }                
                 break;
             case 2:
+                storage_value = def_value[i].data.uint16;
                 if (cfg_backend == STORAGE_NVS)
                 {
 #ifdef ESP_NVS_H
@@ -253,6 +264,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
                 }
                 break;
             case 4:
+                storage_value = def_value[i].data.uint32;
                 if (cfg_backend == STORAGE_NVS)
                 {
 #ifdef ESP_NVS_H
@@ -280,7 +292,16 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
                     EEPROM.write(def_value[i].offset, 0);
                 }
                 break;
-        }        
+        }
+#ifdef CFG_DEBUG
+        if (def_value[i].size == 0)
+        {
+            Serial.printf("Initalize %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
+        } else 
+        {
+            Serial.printf("Initalize %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
+        }
+#endif
     }
 
     if (cfg_backend == STORAGE_NVS)

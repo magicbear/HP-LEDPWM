@@ -7,6 +7,8 @@
   #error Please check config for ESP8266 compile params, required: SSL Support -> Basic SSL ciphers / Flash Size: with at least 32K SPIFFS
   #endif
 #endif
+//#define MIGRATE_ENABLED
+//#define CFG_DEBUG
 
 extern char *dev_name;
 extern char *ssid;
@@ -24,10 +26,10 @@ typedef struct hp_cfg {
     int offset;  /*!< offset for config buffer */
     int size;    /*!< offset for config variable size (1: uint8, 2:uint16, 4: uint32/float, 0: string, other: blob) */
     union {
-      float    f;
       uint32_t uint32;
       uint16_t uint16;
       uint8_t  uint8;
+      float    f;
     } data;    /*!< default value */
     void *assign;    /*!< pointer to data */
     bool full_init;    /*!< init when cfg_init with full_init = false */
