@@ -1,6 +1,5 @@
 #ifdef ARDUINO_ARCH_ESP32
   #include <WiFi.h>
-  #include <HTTPUpdate.h>
   #include <math.h>
   #include <driver/dac.h>
   #include <driver/ledc.h>
@@ -8,17 +7,19 @@
   #include <esp_task_wdt.h>
   #include <esp32-hal-timer.c>
   #include <esp32-hal-adc.h>
-  #define ESPhttpUpdate httpUpdate
 #elif ARDUINO_ARCH_ESP8266
   #include <ESP8266WiFi.h>
-  #include <ESP8266httpUpdate.h>
   extern "C"{
-      #include "pwm.h"
+      #include "pwm.h" 
   }
 #endif
 #include <PubSubClient.h>
 #include <AutoPID.h>
 #include "config.h"
+
+#ifdef ARDUINO_ARCH_ESP32
+__NOINIT_ATTR bool bootBySoftware = false;
+#endif
 
 #if defined(ARDUINO_ESP8266_GENERIC)
   #warning "BOARD: ESP8266, please confirm using 4M with 1M SPIFFS"
@@ -43,16 +44,25 @@ typedef struct {
     uint32_t  scr2_open;
     uint32_t  scr2_close;
 } scr_timing_t;
+// 
+volatile scr_timing_t executeTiming, pendingTiming;
 
-scr_timing_t executeTiming, pendingTiming;
+#define timingCompare(a,b) (a.scr1_open == b.scr1_open && a.scr1_close == b.scr1_close && a.scr2_open == b.scr2_open && a.scr2_close == b.scr2_close)
+#define timingCopy(a,b) { a.scr1_open = b.scr1_open; a.scr1_close = b.scr1_close; a.scr2_open = b.scr2_open; a.scr2_close = b.scr2_close;}
 
 #define DEBUG_LEVEL 2
-#define DEBUG_TRIGGER_PIN 33
-//#define DEBUG_SAVE_PIN 33
+
+#ifdef ARDUINO_ARCH_ESP32
+  #define LED0_PIN 23
+  //#define LED1_PIN 22
+  //#define DEBUG_TRIGGER_PIN 33
+  //#define DEBUG_SAVE_PIN 33
+  #define DEBUG_TIMER_PIN 33
+#endif
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "2.53"
+#define VERSION "2.60"
 
 #ifdef ARDUINO_ARCH_ESP8266
   #define PWM_CHANNELS 2
@@ -125,6 +135,11 @@ typedef __attribute__((__packed__)) struct {
     uint16_t adc_volt_11db;
     float    sensor_ax; // y = ax*pow(x,b)
     float    sensor_b;
+    float    adc_ax;    // y = ax + b
+    float    adc_b;
+    uint8_t  scr_driver;
+    uint8_t  led_feature; // HHHH (LED0) LLLL(LED1)
+    uint16_t pid_interval;
 } conf_t;
 //  __attribute__ ((aligned (2)))
 
@@ -213,7 +228,8 @@ const hp_cfg_t def_cfg[] = {
     AUTO_CONF(mode_ch2, 0, false),
     AUTO_CONF(scr_prerelease, -50, false),
     AUTO_CONF(pin_sensor, 0, false),
-    AUTO_CONF(max_lm, 1000, false),
+    AUTO_CONF(max_lm, 0, false),
+    AUTO_CONF(pid_interval, 100, false),
     AUTO_CONF(KP, 100, false),
     AUTO_CONF(KI, 1500, false),
     AUTO_CONF(KD, 800, false),
@@ -224,6 +240,10 @@ const hp_cfg_t def_cfg[] = {
     AUTO_CONF(adc_volt_11db, 3600, false),
     AUTO_CONF_FLOAT(sensor_ax, 6e+08f, false),
     AUTO_CONF_FLOAT(sensor_b, -1.898f, false),
+    AUTO_CONF(scr_driver, 0, false),
+    AUTO_CONF(led_feature, 3 << 4, false),
+    AUTO_CONF_FLOAT(adc_ax, 1, false),
+    AUTO_CONF_FLOAT(adc_b,  0, false),
     {140, 0, {.uint8=0}, &dev_name, true, "name"},                    // STRING: name
     {178, 0, (uint8_t)0, &ssid, true, "ssid"},                    // STRING: SSID
     {210, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
@@ -520,6 +540,8 @@ void updatePWMValue(float set_state, float ct_abx)
             pwmWrite(config.pin_ch2, isChannelInvert(config.pin_ch2) ? config.pwm_period - pwm_state * cold_power : pwm_state * cold_power);
         } else 
         {
+            pwmWrite(22, pwm_state * warm_power);
+            pwmWrite(23, pwm_state * cold_power);
             //
             scr_current_bright = (config.mode_ch2 != 0 && warm_power != 0 ? config.pwm_start : 0) + pwm_state * warm_power;
             if (scr_current_bright == config.pwm_end && config.auto_fp) scr_current_bright = config.pwm_period;
@@ -564,40 +586,33 @@ uint32_t lastZC_id = 0;
 bool timerRunning = false;
 //bool scrState = 0;
 
-#define updateSCRState(state, pin) digitalWrite(pin, !state)
-//inline void updateSCRState(bool state, int pin)
-//{
-//    scrState = state;
-//    if (state == false)
-//    {
-//#if DEBUG_LEVEL >= 5
-//        Serial.printf("S %ld\n", micros());
-//#endif
-//        digitalWrite(pin, HIGH);
-//    } else 
-//    {
-//#if DEBUG_LEVEL >= 5
-//        Serial.printf("O %ld\n", micros());
-//#endif
-//        // 打开SCR
-//        digitalWrite(pin, LOW);
-//    }
-//}
+#define updateSCRState(state, pin) digitalWrite(pin, config.scr_driver <= 2 ? !state : state)
 
 bool ICACHE_RAM_ATTR timerMarkNextTick(uint32_t currentMicro)
 {
+    bool runNow = false;
     uint32_t nextTick = 0xffffffff;
+//    if (executeTiming.scr1_open !=  0 && executeTiming.scr1_open <= currentMicro) runNow = true;
+//    if (executeTiming.scr1_close != 0 && executeTiming.scr1_close <= currentMicro) runNow = true;
+//    if (executeTiming.scr2_open != 0  && executeTiming.scr2_open <= currentMicro) runNow = true;
+//    if (executeTiming.scr2_close != 0 && executeTiming.scr2_close <= currentMicro) runNow = true;
     if (currentMicro < executeTiming.scr1_open  && executeTiming.scr1_open  - currentMicro <= nextTick)  nextTick = executeTiming.scr1_open - currentMicro;
     if (currentMicro < executeTiming.scr1_close && executeTiming.scr1_close - currentMicro <= nextTick)  nextTick = executeTiming.scr1_close - currentMicro;
     if (currentMicro < executeTiming.scr2_open  && executeTiming.scr2_open  - currentMicro <= nextTick)  nextTick = executeTiming.scr2_open - currentMicro;
     if (currentMicro < executeTiming.scr2_close && executeTiming.scr2_close - currentMicro <= nextTick)  nextTick = executeTiming.scr2_close - currentMicro;
     // Checking for overflow micros
+    if (runNow)
+    {
+        timer1_write(50);
+        return true;
+    }
     if (nextTick <= 5000000)  // nextTick != 0xffffffff && 
     {
         timer1_write(5 * (nextTick));
         return true;
-    } else if (memcmp(&executeTiming, &pendingTiming, sizeof(scr_timing_t)) != 0) {
-        memcpy(&executeTiming, &pendingTiming, sizeof(scr_timing_t));
+    } else if (!timingCompare(executeTiming,pendingTiming)){//memcmp(&executeTiming, &pendingTiming, sizeof(scr_timing_t)) != 0) {
+        timingCopy(executeTiming, pendingTiming);
+//        memcpy(&executeTiming, &pendingTiming, sizeof(scr_timing_t));
         return timerMarkNextTick(currentMicro);
     }
     return false;
@@ -606,6 +621,9 @@ bool ICACHE_RAM_ATTR timerMarkNextTick(uint32_t currentMicro)
 static uint32_t lastSCROpenTiming = 0;
 
 void ICACHE_RAM_ATTR onTimerISR(){
+#ifdef DEBUG_TIMER_PIN
+    digitalWrite(DEBUG_TIMER_PIN, HIGH);
+#endif
     uint32_t  currentMicro = micros();
     bool matched = false;
     if (executeTiming.scr1_open != 0 && currentMicro >= executeTiming.scr1_open && scr_current_bright != 0)
@@ -639,6 +657,9 @@ void ICACHE_RAM_ATTR onTimerISR(){
         // 5 MHz counting, 1 Tick = 0.2us, sleep 0.1% of duty cycle ~= 10ms / 1000 = 10us
         timerRunning = false;
     }
+#ifdef DEBUG_TIMER_PIN
+    digitalWrite(DEBUG_TIMER_PIN, LOW);
+#endif
 }
 
 long inline inline_map(long x, long in_min, long in_max, long out_min, long out_max) {
@@ -653,33 +674,50 @@ void ICACHE_RAM_ATTR calcSCRTiming(uint32_t currentMicro)
 {
     // DIV 16 = 80/16 = 5 Mhz = 0.2us per tick
     // 1us = 5 tick
-    if (scr_current_bright == 0 || (config.scr_delay == 0 && config.scr_prerelease == 0 && scr_current_bright != config.pwm_period))
+    if (scr_current_bright == 0 || (config.scr_driver == 0 && config.scr_delay == 0 && config.scr_prerelease == 0 && scr_current_bright != config.pwm_period))
     {
         updateSCRState(false, config.pin_ch1); // 过零触发，关闭SCR
     }
-    if (scr_current_bright == 0 || (config.scr_delay == 0 && config.scr_prerelease == 0 && scr_current_bright2 != config.pwm_period && config.pin_ch2 != 0))
+    if (scr_current_bright == 0 || (config.scr_driver == 0 && config.scr_delay == 0 && config.scr_prerelease == 0 && scr_current_bright2 != config.pwm_period && config.pin_ch2 != 0))
     {
         updateSCRState(false, config.pin_ch2); // 过零触发，关闭SCR
     }
-    memset(&pendingTiming, 0, sizeof(scr_timing_t));
+    pendingTiming.scr1_open = 0;
+    pendingTiming.scr1_close = 0;
+    pendingTiming.scr2_open = 0;
+    pendingTiming.scr2_close = 0;
     if (scr_current_bright != 0)
     {
         if (scr_current_bright == config.pwm_period)
         {
             updateSCRState(true, config.pin_ch1);
         }else {
-            pendingTiming.scr1_open = zc_last + (config.scr_delay != 0 ? config.scr_delay : 0) + inline_map(scr_current_bright, 0, config.pwm_period, zc_interval, 0);
-            if (config.scr_prerelease > 0)
+            if (config.scr_driver == 0)
             {
-                pendingTiming.scr1_close = pendingTiming.scr1_open + config.scr_prerelease * 10;
-            } else if (config.scr_prerelease < 0)
-            {
-                pendingTiming.scr1_close = zc_interval - config.scr_prerelease*10 > (zc_last - zc_last) ?  zc_last + (config.scr_delay != 0 ? config.scr_delay : 0) + zc_interval - (zc_last - zc_last) + config.scr_prerelease*10 : 0;
+                // First Close, after Open
+                pendingTiming.scr1_open = zc_last + (config.scr_delay != 0 ? config.scr_delay : 0) + inline_map(scr_current_bright, 0, config.pwm_period, zc_interval, 0);
+                if (config.scr_prerelease > 0)
+                {
+                    pendingTiming.scr1_close = pendingTiming.scr1_open + config.scr_prerelease * 10;
+                } else if (config.scr_prerelease < 0)
+                {
+                    pendingTiming.scr1_close = zc_interval - config.scr_prerelease*10 > 0 ?  zc_last + (config.scr_delay != 0 ? config.scr_delay : 0) + zc_interval + config.scr_prerelease*10 : 0;
+                    if (pendingTiming.scr1_close <= pendingTiming.scr1_open) pendingTiming.scr1_open = 0;
+                }
+                if (pendingTiming.scr1_close == 0 || pendingTiming.scr1_close >= zc_last + zc_interval + config.scr_delay)
+                {
+                    pendingTiming.scr1_close = zc_last + zc_interval + config.scr_delay;
+                }
+            } else {
+                // First Open, after Close
+                pendingTiming.scr1_open = zc_last + (config.scr_delay != 0 ? config.scr_delay : 0);
+                if (pendingTiming.scr1_open <= currentMicro) pendingTiming.scr1_open = currentMicro + 1;
+                pendingTiming.scr1_close = pendingTiming.scr1_open + inline_map(scr_current_bright, 0, config.pwm_period, 0, zc_interval);
+                if (config.scr_prerelease != 0)
+                {
+                    pendingTiming.scr1_close = (config.scr_prerelease > 0 ? pendingTiming.scr1_open : pendingTiming.scr1_close) + config.scr_prerelease*10;
+                }
                 if (pendingTiming.scr1_close <= pendingTiming.scr1_open) pendingTiming.scr1_open = 0;
-            }
-            if (pendingTiming.scr1_close == 0 || pendingTiming.scr1_close >= zc_last + zc_interval + config.scr_delay)
-            {
-                pendingTiming.scr1_close = zc_last + zc_interval - (zc_last - zc_last) + config.scr_delay;
             }
         }
     }
@@ -689,17 +727,32 @@ void ICACHE_RAM_ATTR calcSCRTiming(uint32_t currentMicro)
         {
             updateSCRState(true, config.pin_ch2);
         }else {
-            pendingTiming.scr2_open = zc_last + (config.scr_delay != 0 ? config.scr_delay : 0) + (config.pwm_start * zc_interval / config.pwm_period) + inline_map(scr_current_bright2, 0, config.pwm_period, zc_interval, 0);
-            if (config.scr_prerelease > 0)
+            if (config.scr_driver == 0)
             {
-                pendingTiming.scr2_close = pendingTiming.scr1_open + config.scr_prerelease * 10;
-            } else if (config.scr_prerelease < 0)
-            {
-                pendingTiming.scr2_close = zc_interval - config.scr_prerelease*10 > (zc_last - zc_last) ?  zc_last + (config.scr_delay != 0 ? config.scr_delay : 0) + zc_interval - (zc_last - zc_last) + config.scr_prerelease*10 : 0;
+                // First Close, after Open
+                pendingTiming.scr2_open = zc_last + (config.scr_delay != 0 ? config.scr_delay : 0) + inline_map(scr_current_bright2, 0, config.pwm_period, zc_interval, 0);
+                if (config.scr_prerelease > 0)
+                {
+                    pendingTiming.scr2_close = pendingTiming.scr2_open + config.scr_prerelease * 10;
+                } else if (config.scr_prerelease < 0)
+                {
+                    pendingTiming.scr2_close = zc_interval - config.scr_prerelease*10 > 0 ? zc_last + config.scr_delay + zc_interval + config.scr_prerelease*10 : 0;
+                    if (pendingTiming.scr2_close <= pendingTiming.scr2_open) pendingTiming.scr2_open = 0;
+                }
+                if (pendingTiming.scr2_close == 0 || pendingTiming.scr2_close >= zc_last + zc_interval + config.scr_delay)
+                {
+                    pendingTiming.scr2_close = zc_last + zc_interval + config.scr_delay;
+                }
+            } else {
+                // First Open, after Close
+                pendingTiming.scr2_open = zc_last + (config.scr_delay != 0 ? config.scr_delay : 0);
+                if (pendingTiming.scr2_open <= currentMicro) pendingTiming.scr2_open = currentMicro + 1;
+                pendingTiming.scr2_close = pendingTiming.scr2_open + inline_map(scr_current_bright2, 0, config.pwm_period, 0, zc_interval);
+                if (config.scr_prerelease != 0)
+                {
+                    pendingTiming.scr2_close = (config.scr_prerelease > 0 ? pendingTiming.scr2_open : pendingTiming.scr2_close) + config.scr_prerelease*10;
+                }
                 if (pendingTiming.scr2_close <= pendingTiming.scr2_open) pendingTiming.scr2_open = 0;
-            } else 
-            {
-                pendingTiming.scr2_close = zc_last + zc_interval - (zc_last - zc_last) + config.scr_delay;
             }
         }
     }
@@ -747,6 +800,9 @@ void ICACHE_RAM_ATTR ZC_detect()
 
 void inline disableInterrupts()
 {
+#ifdef DEBUG_TIMER_PIN
+    digitalWrite(DEBUG_TIMER_PIN, HIGH);
+#endif
 #if DEBUG_LEVEL >= 3
   Serial.printf("Disable interrupt\n");
 #endif
@@ -769,6 +825,9 @@ void inline disableInterrupts()
 
 void inline enableInterrupts()
 {
+#ifdef DEBUG_TIMER_PIN
+    digitalWrite(DEBUG_TIMER_PIN, LOW);
+#endif
 #if DEBUG_LEVEL >= 3
   Serial.printf("Enable interrupt\n");
 #endif
@@ -808,6 +867,13 @@ void inline enableInterrupts()
   }
 }
 
+
+void onCfgUpdated()
+{
+    CFG_SAVE();
+    sendMeta();
+}
+
 void setup() {
   uint16_t boot_count = 0;
 #ifdef DEBUG_TRIGGER_PIN
@@ -818,6 +884,23 @@ void setup() {
   pinMode(DEBUG_SAVE_PIN, OUTPUT);
   digitalWrite(DEBUG_SAVE_PIN, LOW);
 #endif
+#ifdef DEBUG_TIMER_PIN
+  pinMode(DEBUG_TIMER_PIN, OUTPUT);
+  digitalWrite(DEBUG_TIMER_PIN, LOW);
+#endif
+
+#ifdef LED0_PIN
+  pinMode(LED0_PIN, OUTPUT);
+  digitalWrite(LED0_PIN, HIGH);
+  ledcSetup(3, 1000, 8);
+  ledcWrite(3, 255);
+  ledcAttachPin(LED0_PIN, 3);
+#endif
+#ifdef LED1_PIN
+  pinMode(LED1_PIN, OUTPUT);
+  digitalWrite(LED1_PIN, HIGH);
+#endif
+  
   pinMode(LED_BUILTIN, OUTPUT);
   WiFi.persistent( false );
   Serial.begin(115200);
@@ -833,8 +916,17 @@ void setup() {
 #endif
   // ESP_RST_BROWNOUT
 
-  memset(&executeTiming, 0, sizeof(scr_timing_t));
-  memset(&pendingTiming, 0, sizeof(scr_timing_t));
+    pendingTiming.scr1_open = 0;
+    pendingTiming.scr1_close = 0;
+    pendingTiming.scr2_open = 0;
+    pendingTiming.scr2_close = 0;
+    
+    executeTiming.scr1_open = 0;
+    executeTiming.scr1_close = 0;
+    executeTiming.scr2_open = 0;
+    executeTiming.scr2_close = 0;
+//  memset(&executeTiming, 0, sizeof(scr_timing_t));
+//  memset(&pendingTiming, 0, sizeof(scr_timing_t));
   cfg_begin();
   bool cfgCheck = CFG_CHECK();
   if (!CFG_LOAD())
@@ -845,22 +937,22 @@ void setup() {
   if (config.reversion != 1)
   {
       // Migrate from Old Version ** NOT FOR NVS **
-      Serial.printf("Migrate from Old Config Reversion: %d\n", config.reversion);
+      printLog(LOG_INFO, "Migrate from Old Config Reversion: %d\n", config.reversion);
       cfg_load(old_def_cfg);
       config.reversion = def_cfg[0].data.uint8;
-      Serial.printf("Migrated config Reversion: %d\n", config.reversion);
+      printLog(LOG_INFO, "Migrated config Reversion: %d\n", config.reversion);
 #ifdef ARDUINO_ARCH_ESP8266
       // Migrate from old 16 bits to 32 bits
       config.pwm_freq = config.pwm_freq & 0xffff;
 #endif
       CFG_SAVE();
       cfg_load(def_cfg);
-      Serial.printf("Migrated config Reversion: %d\n", config.reversion);
+      printLog(LOG_INFO, "Migrated config Reversion: %d\n", config.reversion);
   }
 #endif
   if (config.pwm_freq == 0 || config.pwm_period == 0)
   {
-      Serial.printf("Invalid PWM Frequence, reset configure\n");
+      printLog(LOG_ERROR, "Invalid PWM Frequence, reset configure\n");
       CFG_INIT(true);
       CFG_LOAD();
   }
@@ -874,10 +966,10 @@ void setup() {
       pinMode(35, INPUT_PULLUP);
       delay(100);
       // >= V1.7.1 PCB Auto Settings
-      Serial.printf("AutoConf Resistor Value: %ld\n", pin35_value);
+      printLog(LOG_INFO, "AutoConf Resistor Value: %ld\n", pin35_value);
       if (2400 <= pin35_value && pin35_value <= 2750) // 4.7k/10k with 5%
       {
-          Serial.printf("Auto Initalize by PCB Board - SCR Version\n");
+          printLog(LOG_INFO, "Auto Initalize by PCB Board - SCR Version\n");
           config.work_mode = 4;
           config.pin_ch1 = 4;
           config.pin_ch2 = 16;
@@ -887,9 +979,38 @@ void setup() {
           config.pin_scr_trig = 5;
           config.pin_sensor = 32;
           CFG_SAVE();
+      } else if (1083 <= pin35_value && pin35_value <= 1150) // 1k/10k with 3%
+      {
+          printLog(LOG_INFO, "Auto Initalize by PCB Board - MOSRPC Version >= 2.5\n");
+          config.work_mode = 4;
+          config.pin_ch1 = 5;
+          config.pin_ch2 = 15;
+          config.mode_ch2 = 1;
+          config.pin_en1 = 0;
+          config.pin_en2 = 0;
+          config.pin_scr_trig = 4;
+          config.pin_sensor = 32;
+          config.scr_driver = 1;
+          CFG_SAVE();
+      } else if (1780 <= pin35_value && pin35_value <= 1970) // 10k/10k with 3%
+      {
+          printLog(LOG_INFO, "Auto Initalize by PCB Board - MOSRPC Version\n");
+          config.work_mode = 4;
+          config.pin_ch1 = 4;
+          config.pin_ch2 = 16;
+          config.mode_ch2 = 1;
+          config.pin_en1 = 0;
+          config.pin_en2 = 0;
+          config.pin_scr_trig = 5;
+          config.pin_sensor = 32;
+          config.scr_driver = 1;
+          CFG_SAVE();
+      } else if (1986 <= pin35_value && pin35_value <= 2108) // 2k/10k with 3%
+      {
+          // 0-10V Version
       } else if (digitalRead(34) == HIGH)
       {
-          Serial.printf("Auto Initalize by PCB Board - Dual CH\n");
+          printLog(LOG_INFO, "Auto Initalize by PCB Board - Dual CH\n");
           config.work_mode = 0;
           config.pin_ch1 = 25;
           config.pin_ch2 = 26;
@@ -897,7 +1018,7 @@ void setup() {
           config.pin_en2 = 33;
       } else if (digitalRead(35) == HIGH)
       {
-          Serial.printf("Auto Initalize by PCB Board - Single CH\n");
+          printLog(LOG_INFO, "Auto Initalize by PCB Board - Single CH\n");
           config.work_mode = 0;
           config.pin_ch1 = 25;
           config.pin_ch2 = 0;
@@ -905,7 +1026,7 @@ void setup() {
           config.pin_en2 = 0;
       } else if (digitalRead(27) == LOW)
       {
-          Serial.printf("Auto Initalize by PCB Board - Dual CH V1.7\n");
+          printLog(LOG_INFO, "Auto Initalize by PCB Board - Dual CH V1.7\n");
           config.work_mode = 0;
           config.pin_ch1 = 26;
           config.pin_ch2 = 25;
@@ -937,55 +1058,28 @@ void setup() {
   }
   ignoreOutput = true;
   updatePWMValue(0, config.mode_ch2 == 0 ? config.ct_abx : 0);
-#ifdef ARDUINO_ARCH_ESP8266
-  if ((resetInfo->reason == REASON_DEFAULT_RST || resetInfo->reason == REASON_EXT_SYS_RST) && strlen(ssid) != 0)
-#elif ARDUINO_ARCH_ESP32
+
+#if ARDUINO_ARCH_ESP32
   if (config.pwm_freq <= 40000 && (config.work_mode == 0 || config.work_mode == 1))
   {
       setCpuFrequencyMhz(80);
   }
-  if ((resetCode == POWERON_RESET || resetCode == RTCWDT_RTC_RESET) && strlen(ssid) != 0)
-#endif
-  {
-      last_state_hold = millis();
-      last_set_state = 0;
-      if (config.mode_ch2 == 1) last_ct_abx = 0;
-      boot_count = boot_count_increase();
-  }
-#ifdef ARDUINO_ARCH_ESP8266
-  // ESP8266 will break PWM update between WiFi connecting, so we need to make smooth before WiFi action
-  if (config.work_mode == 0 || config.work_mode == 1)
-  {
-      while (last_state_hold != 0  && millis() - last_state_hold < config.startup_smooth)
-      {
-          STARTUP_SMOOTH_EXECUTE;
-          yield();
-      }
-  }
 #endif
   
-  if (config.pin_reset != 0)
-  {
-      pinMode(config.pin_reset, INPUT_PULLUP);
-      delay(1);
-      if (digitalRead(config.pin_reset) == LOW)
+#ifdef ARDUINO_ARCH_ESP8266
+  // ESP8266 will break PWM update between WiFi connecting, so we need to make smooth before WiFi action
+  if ((resetInfo->reason == REASON_DEFAULT_RST || resetInfo->reason == REASON_EXT_SYS_RST) && strlen(ssid) != 0) {
+      if (config.work_mode == 0 || config.work_mode == 1)
       {
-          Serial.printf("Reset config by RESET PIN %d\n", config.pin_reset);
-          CFG_INIT(false);
-          CFG_LOAD();
-          rebootSystem();
-      }
-  } else {
-      if (boot_count > 5)
-      {
-          Serial.printf("Reset config by Reboot 5 times\n");
-          CFG_INIT(false);
-          CFG_LOAD();
-          rebootSystem();
+          while (last_state_hold != 0  && millis() - last_state_hold < config.startup_smooth)
+          {
+              STARTUP_SMOOTH_EXECUTE;
+              yield();
+          }
       }
   }
+#endif
 
-  boot_time = millis();
   if (config.pin_ch1 != LED_BUILTIN)
   {
       digitalWrite(LED_BUILTIN, LOW);
@@ -994,33 +1088,17 @@ void setup() {
 //  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
 
   Serial.printf("\n");
-  Serial.printf("CONFIG SRC: %s\n", cfg_get_backend());
-  Serial.printf("Boot Count: %d\n", boot_count);
-#ifdef ARDUINO_ARCH_ESP8266
-  Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
-  Serial.printf("Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
-#elif ARDUINO_ARCH_ESP32
-  Serial.printf("Reset Reason: %d\n", resetCode);
-//  Serial.printf("RTC Reset Reason: %d\n", rtc_get_reset_reason());
-  Serial.printf("CPU Speed: %d MHz  XTAL: %d MHz  APB: %d Hz\n", getCpuFrequencyMhz(), getXtalFrequencyMhz(), getApbFrequency());
-#endif
-  Serial.printf("Version: %s\n", VERSION);
-  Serial.printf("Board: %s\n", ARDUINO_BOARD);
-  Serial.printf("Build Date: %s %s  CFG SIZE: %d\n", __DATE__, __TIME__, sizeof(conf_t));
+  cfg_initalize_info(sizeof(conf_t));
+  printLog(LOG_INFO, "Version: %s\n", VERSION);
   Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
 
   startupWifiConfigure(def_cfg, msg_buf, sizeof(msg_buf), mqtt_cls);
-
-#ifdef ARDUINO_ARCH_ESP8266
   updatePWMValue(config.bright, config.ct_abx);
-#elif ARDUINO_ARCH_ESP32
-  updatePWMValue(config.bright, config.ct_abx);
-#endif
   
 //  ignoreOutput = true;
   Serial.printf("\n");
   Serial.printf("SSID = %s  PASSWORD = %s\n", ssid, password);
-  Serial.printf("PWM Frequence = %d   Range = %d - %d   Period = %d\n", config.pwm_freq, config.pwm_start, config.pwm_end, config.pwm_period);
+  Serial.printf("PWM Frequence = %d   Range = %d - %d   Period = %d  Startup = %d\n", config.pwm_freq, config.pwm_start, config.pwm_end, config.pwm_period, config.startup_smooth);
   if (config.work_mode == 2 || config.work_mode == 3 || config.work_mode == 4)
   {
       Serial.printf("SCR PIN: %d  TRIGGER PIN: %d  MODE: %d  CFG RESET PIN: %d\n", config.pin_ch1, config.pin_scr_trig, config.work_mode, config.pin_reset);
@@ -1055,7 +1133,7 @@ void setup() {
           delay(50);
           if (Serial.read() == 'r')
           {
-              Serial.printf("Reset config command from serial.\n");
+              printLog(LOG_INFO, "Reset config command from serial.\n");
               cfg_reset(def_cfg);
               ESP.restart();
           }
@@ -1068,28 +1146,66 @@ void setup() {
     if (!bootCountReset && millis() - boot_time >= 5000)
     {
         bootCountReset = true;
-        disableInterrupts();
-        boot_count_reset();
-        enableInterrupts();
+        if (cfg_get_backend_t() == STORAGE_NVS)
+        {
+            boot_count_reset();
+        } else {
+            disableInterrupts();
+            boot_count_reset();
+            enableInterrupts();
+        }
     }
     yield();
   }
   Serial.printf("\n");
-
 #endif
+
+#if ARDUINO_ARCH_ESP32
+  if (((resetCode == POWERON_RESET || resetCode == OWDT_RESET || resetCode == SW_CPU_RESET) && rtc_get_reset_reason(1) == EXT_CPU_RESET)  && strlen(ssid) != 0)
+#endif
+  {
+      last_state_hold = millis();
+      last_set_state = 0;
+      if (config.mode_ch2 == 1) last_ct_abx = 0;
+      boot_count = boot_count_increase();
+  }
+  if (config.pin_reset != 0)
+  {
+      pinMode(config.pin_reset, INPUT_PULLUP);
+      delay(1);
+      if (digitalRead(config.pin_reset) == LOW)
+      {
+          printLog(LOG_INFO, "Reset config by RESET PIN %d\n", config.pin_reset);
+          CFG_INIT(false);
+          CFG_LOAD();
+          rebootSystem();
+      }
+  } else {
+      if (boot_count > 5)
+      {
+          boot_count_reset();
+          printLog(LOG_INFO, "Reset config by Reboot 5 times\n");
+          CFG_INIT(false);
+          CFG_LOAD();
+          rebootSystem();
+      }
+  }
+
+  boot_time = millis();
+  printLog(LOG_INFO, "Boot Count: %d\n", boot_count);
+
+//  Serial.printf("last_state_hold = %d  %d  %d\n", last_state_hold, millis() - last_state_hold , config.startup_smooth);
   while (last_state_hold != 0 && millis() - last_state_hold < config.startup_smooth)
   {
       STARTUP_SMOOTH_EXECUTE;
       yield();
   }
-
+  
   ignoreOutput = false;
   last_state_hold = 0;
-  
+
 ////  WiFi.setSleepMode(WIFI_LIGHT_SLEEP, 1000);
-  client.setServer((const char *)mqtt_server, port);//端口号
-  client.setCallback(callback); //用于接收服务器接收的数据
-//  Serial.printf("Success\n");
+  init_mqtt_client(&client, callback, onCfgUpdated);
   if (LED_BUILTIN != config.pin_ch1 && LED_BUILTIN != config.pin_ch2)
   {
       digitalWrite(LED_BUILTIN, HIGH);    
@@ -1098,9 +1214,13 @@ void setup() {
   // if luminous is more than 500 lx degrees below or above setpoint, OUTPUT will be set to min or max respectively
 //  pidControl.setBangBang(15000);
   //set PID update interval to 100ms
-  pidControl.setTimeStep(100);
+  pidControl.setTimeStep(config.pid_interval);
   pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV);
   pidControl.reset();
+
+#ifdef ARDUINO_ARCH_ESP32
+  bootBySoftware = true;
+#endif
 }
 
 void sendMeta()
@@ -1112,12 +1232,16 @@ void sendMeta()
     client.publish("dev", msg_buf);
     if (isScrMode)
     {
-        p = msg_buf + sprintf(msg_buf, "{\"scr_delay\":%d,\"trigger_pin\":%d,\"prerelease\":%d}", config.scr_delay, config.pin_scr_trig, config.scr_prerelease);
+        p = msg_buf + sprintf(msg_buf, "{\"scr_delay\":%d,\"trigger_pin\":%d,\"prerelease\":%d,\"scr_driver\":%d}", config.scr_delay, config.pin_scr_trig, config.scr_prerelease, config.scr_driver);
         client.publish("dev", msg_buf);
     }
 //    if (config.pin_sensor != 0)
     {
-        p = msg_buf + sprintf(msg_buf, "{\"sensor_pin\":%d,\"max_lm\":%d,\"kp\":%ld,\"ki\":%ld,\"kd\":%ld,\"ref\":\"%d,%d\",\"adcref\":\"%d,%d,%d\",\"ax\":%f,\"b\":%f}", config.pin_sensor, config.max_lm, config.KP, config.KI, config.KD, config.sensor_ref, config.sensor_ref_r1, config.adc_volt_0db, config.adc_volt_6db, config.adc_volt_11db, config.sensor_ax, config.sensor_b);
+        p = msg_buf + sprintf(msg_buf, "{\"sensor_pin\":%d,\"max_lm\":%d,\"kp\":%ld,\"ki\":%ld,\"kd\":%ld,\"pid_interval\":%d}", config.pin_sensor, config.max_lm, config.KP, config.KI, config.KD, config.pid_interval);
+        
+        client.publish("dev", msg_buf);
+        
+        p = msg_buf + sprintf(msg_buf, "{\"ref\":\"%d,%d\",\"adcref\":\"%d,%d,%d\",\"ax\":%f,\"b\":%f,\"adc_ax\":%f,\"adc_b\":%f}", config.sensor_ref, config.sensor_ref_r1, config.adc_volt_0db, config.adc_volt_6db, config.adc_volt_11db, config.sensor_ax, config.sensor_b, config.adc_ax, config.adc_b);
         client.publish("dev", msg_buf);
     }
     
@@ -1126,7 +1250,7 @@ void sendMeta()
 }
 
 
-void callback(char* topic, byte* payload, unsigned int length) {//用于接收数据
+bool callback(char* topic, byte* payload, unsigned int length) {//用于接收数据
   int l=0;
   int p=1;
   hasPacket = true;
@@ -1149,7 +1273,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
         save_config = false;
         SMOOTH_INTERVAL = atoi(strchr((char *)payload, ',') + 1);
         *strchr((char *)payload, ',') = 0;
-        Serial.printf("Set SMOOTH_INTERVAL to %d\n", SMOOTH_INTERVAL);
+        printLog(LOG_INFO, "Set SMOOTH_INTERVAL to %d\n", SMOOTH_INTERVAL);
     }
     if (strcmp(topic, "set_bright") == 0)
     {
@@ -1191,53 +1315,10 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
         last_state_hold = millis();
     }
     last_state = -1;
-    return;
+    return true;
   }
   disableInterrupts();
-  if (strcmp(topic, "ota") == 0)
-  {
-    WiFiClient ota_client;
-
-    char bufferByte = payload[length];
-    payload[length] = 0;
-    Serial.printf("Start OTA from URL: %s\n", (char *)payload);
-    t_httpUpdate_return ret = ESPhttpUpdate.update(ota_client, (char *)payload);
-
-    payload[length] = bufferByte;
-
-    switch (ret) {
-      case HTTP_UPDATE_FAILED:
-        sprintf(msg_buf, "{\"ota\":\"%s\"}", ESPhttpUpdate.getLastErrorString().c_str());
-        client.publish("status", msg_buf);
-        Serial.printf("HTTP_UPDATE_FAILD Error (%d): %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
-        rebootSystem();
-        break;
-
-      case HTTP_UPDATE_NO_UPDATES:
-        sprintf(msg_buf, "{\"ota\":\"no updates\"}");
-        client.publish("status", msg_buf);
-        Serial.println("HTTP_UPDATE_NO_UPDATES");
-        rebootSystem();
-        break;
-
-      case HTTP_UPDATE_OK:
-        sprintf(msg_buf, "{\"ota\":\"success\"}");
-        client.publish("status", msg_buf);
-        Serial.println("HTTP_UPDATE_OK");
-        rebootSystem();
-        break;
-    }
-  } else if (strcmp(topic, "setName") == 0)
-  {
-      if (length < 32)
-      {
-          strncpy(dev_name, (const char *)payload, length);
-          dev_name[length] = 0;
-          Serial.printf("Set Device Name to %s\n", dev_name);
-      }
-      CFG_SAVE();
-      sendMeta();
-  } else if (strcmp(topic, "set_pwm_freq") == 0)
+  if (strcmp(topic, "set_pwm_freq") == 0)
   {
       char bufferByte = payload[length];
       payload[length] = 0;
@@ -1348,6 +1429,10 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       last_state = -1;
       inSmooth = true; last_state_hold = 0;
       sendMeta();
+  } else if (strcmp(topic, "toggle_realtime") == 0)
+  {
+      realtime_data = !realtime_data;
+      printLog(LOG_INFO, "Toggle Realtime Data: %s\n", realtime_data ? "ON" : "OFF");
   } else if (strcmp(topic, "reset") == 0)
   {
       if (length > 0 && payload[0] == '1')
@@ -1357,13 +1442,7 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
       {
           CFG_INIT(false);
       }
-      Serial.printf("Reset System\n");
-  } else if (strcmp(topic, "reboot") == 0)
-  {
-      rebootSystem();
-  } else if (strcmp(topic, "toggle_realtime") == 0)
-  {
-      realtime_data = !realtime_data;
+      printLog(LOG_INFO, "Reset System\n");
   }
   AUTO_CONF_INT_COMMAND(topic, "set_config_pin", pin_reset, )
   AUTO_CONF_INT_COMMAND(topic, "set_autosave", autosave, )
@@ -1377,12 +1456,14 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   AUTO_CONF_INT_COMMAND(topic, "set_adc_pin", pin_adc_bright, inSmooth = true; last_state_hold = 0)
   AUTO_CONF_INT_COMMAND(topic, "set_auto_full_power", auto_fp, inSmooth = true; last_state_hold = 0)
   AUTO_CONF_INT_COMMAND(topic, "set_scr_prerelease", scr_prerelease, )
+  AUTO_CONF_INT_COMMAND(topic, "set_scr_driver", scr_driver, )
   AUTO_CONF_INT_COMMAND(topic, "set_startup_smooth", startup_smooth, )
-  AUTO_CONF_INT_COMMAND(topic, "set_sensor_pin", pin_sensor, inSmooth = true; last_state_hold = 0)
-  AUTO_CONF_INT_COMMAND(topic, "set_max_lm", max_lm, inSmooth = true; last_state_hold = 0)
+  AUTO_CONF_INT_COMMAND(topic, "set_sensor_pin", pin_sensor, inSmooth = true; last_state_hold = 0; pidControl.reset())
+  AUTO_CONF_INT_COMMAND(topic, "set_max_lm", max_lm, inSmooth = true; last_state_hold = 0; pidControl.reset())
   AUTO_CONF_INT_COMMAND(topic, "set_kp", KP, pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV); pidControl.reset())
   AUTO_CONF_INT_COMMAND(topic, "set_ki", KI, pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV); pidControl.reset())
   AUTO_CONF_INT_COMMAND(topic, "set_kd", KD, pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV); pidControl.reset())
+  AUTO_CONF_INT_COMMAND(topic, "set_pid_interval", pid_interval, pidControl.setTimeStep(config.pid_interval); pidControl.reset())
   AUTO_CONF_INT_COMMAND(topic, "set_sensor_ref", sensor_ref, )
   AUTO_CONF_INT_COMMAND(topic, "set_sensor_ref_r1", sensor_ref_r1, )
   AUTO_CONF_INT_COMMAND(topic, "set_adc_0db", adc_volt_0db, )
@@ -1390,65 +1471,19 @@ void callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   AUTO_CONF_INT_COMMAND(topic, "set_adc_11db", adc_volt_11db, )
   AUTO_CONF_FLOAT_COMMAND(topic, "set_sensor_ax", sensor_ax, )
   AUTO_CONF_FLOAT_COMMAND(topic, "set_sensor_b", sensor_b, )
+  AUTO_CONF_INT_COMMAND(topic, "set_led_feature", led_feature, )
+  AUTO_CONF_FLOAT_COMMAND(topic, "set_adc_ax", adc_ax, )
+  AUTO_CONF_FLOAT_COMMAND(topic, "set_adc_b", adc_b, )
   
   enableInterrupts();
+  return false;
 }
 
-bool reconnect() {//等待，直到连接上服务器
-  static uint32_t disconnectTime = 0;
-  static wl_status_t lastWiFiStatus = WL_NO_SHIELD;
-  static int retry_failed_count = 0;
-
-  if (WiFi.status() != lastWiFiStatus)
-  {
-      if (WiFi.status() != WL_CONNECTED) {
-          disconnectTime = millis();
-      } else 
-      {
-          disconnectTime = 0;
-          IPAddress myAddress = WiFi.localIP();
-          Serial.printf("Connected to wifi, IP: ");
-          Serial.print(myAddress);
-          Serial.printf("\n");
-      }
-      lastWiFiStatus = WiFi.status();
-  }
-  if (WiFi.status() != WL_CONNECTED && millis() - disconnectTime >= 30000) {
-      Serial.printf("WiFi: Status = %d (Disconnected), RESET SYSTEM\n", WiFi.status());
-      rebootSystem();
-  }
-  if (WiFi.status() == WL_CONNECTED && !client.connected()){
-      Serial.printf("Connecting to MQTT %s:%d\n", mqtt_server, port);
-#ifdef ARDUINO_ARCH_ESP32
-      esp_task_wdt_init(30, true);
-      esp_task_wdt_add(NULL);
-#endif
-      if (client.connect(mqtt_cls)) {//接入时的用户名，尽量取一个很不常用的用户名
-        retry_failed_count = 0;
-        Serial.printf("Connect to MQTT success, login by: %s\n",mqtt_cls);
-  #ifdef ARDUINO_ARCH_ESP32
-        esp_task_wdt_delete(NULL);
-        esp_task_wdt_deinit();
-  #endif
-        sendMeta();
-        last_rssi = -1;
-        last_state = -1;
-      } else {
-  #ifdef ARDUINO_ARCH_ESP32
-        esp_task_wdt_reset();
-  #endif
-        retry_failed_count++;
-        Serial.printf("Connect failed, rc=%d\n", client.state());//连接失败
-        client.disconnect();
-        delay(1000);
-        if (retry_failed_count >= 10)
-        {
-            Serial.printf("MQTT: Reconnect Too many times, RESET SYSTEM\n");
-            rebootSystem();
-        }
-      }
-  }
-  return WiFi.status() == WL_CONNECTED && client.connected();
+void on_mqtt_connected()
+{
+    sendMeta();
+    last_rssi = -1;
+    last_state = -1;
 }
 
 int uint16_cmpfunc (const void * a, const void * b) {
@@ -1475,18 +1510,17 @@ void loop() {
     while (Serial.available())
     {
       char ch = Serial.read();
-      if (ch == 'S')
-      {
-          Serial.printf("Set pin %d to OUTPUT\n", config.pin_ch1);
-          pinMode(config.pin_ch1, OUTPUT);
-          digitalWrite(config.pin_ch1, HIGH);
-//          updateSCRState(false);
-      } else if (ch == 'O') {
-          Serial.printf("Set pin %d to OUTPUT OPEN\n", config.pin_ch1);
-          pinMode(config.pin_ch1, OUTPUT);
-          digitalWrite(config.pin_ch1, LOW);
-//          updateSCRState(true);
-      } else if (ch == 'R' && Serial.read() == 'r') {
+//      if (ch == 'S')
+//      {
+//          Serial.printf("Set pin %d to OUTPUT\n", config.pin_ch1);
+//          pinMode(config.pin_ch1, OUTPUT);
+//          digitalWrite(config.pin_ch1, HIGH);
+//      } else if (ch == 'O') {
+//          Serial.printf("Set pin %d to OUTPUT OPEN\n", config.pin_ch1);
+//          pinMode(config.pin_ch1, OUTPUT);
+//          digitalWrite(config.pin_ch1, LOW);
+//      } else 
+      if (ch == 'R' && Serial.read() == 'r') {
           cfg_reset(def_cfg);
           ESP.restart();
       }
@@ -1494,9 +1528,14 @@ void loop() {
     if (!bootCountReset && currentMillis - boot_time >= 5000)
     {
         bootCountReset = true;
-        disableInterrupts();
-        boot_count_reset();
-        enableInterrupts();
+        if (cfg_get_backend_t() == STORAGE_NVS)
+        {
+            boot_count_reset();
+        } else {
+            disableInterrupts();
+            boot_count_reset();
+            enableInterrupts();
+        }
     }
     if (SMOOTH_INTERVAL == 0)
     {
@@ -1521,7 +1560,7 @@ void loop() {
 #ifdef DEBUG_SAVE_PIN
         digitalWrite(DEBUG_SAVE_PIN, HIGH);
 #endif
-        Serial.printf("Saving config to FLASH...");
+        printLog(LOG_INFO, "Saving config to FLASH...");
         uint32_t t1 = micros();
         uint32_t usages = 0;
         if (cfg_get_backend_t() == STORAGE_NVS)
@@ -1550,56 +1589,63 @@ void loop() {
         int16_t new_adc_value2 = analogRead(config.pin_adc_bright);
         if (abs(new_adc_value - new_adc_value2) < 100 && abs(new_adc_value - lastAdcValue) > 4096/20)
         {
-          Serial.printf("Change value: %d\n", abs(new_adc_value - lastAdcValue));
+            printLog(LOG_INFO, "Analog Change value: %d\n", abs(new_adc_value - lastAdcValue));
             sprintf(msg_buf, "%d", (uint32_t)new_adc_value * 100 / 4096);
             lastAdcValue = new_adc_value;
             callback("set_bright", (byte *)msg_buf, strlen(msg_buf));
         }
       }
     }
-    if (config.pin_sensor != 0 && config.max_lm != 0 && (currentMillis - lastSensorDetect >= 100 || currentMillis < lastSensorDetect))
+#ifdef ARDUINO_ARCH_ESP32
+    if (config.pin_sensor != 0 && (currentMillis - lastSensorDetect >= 100 || currentMillis < lastSensorDetect))
     {
-      // Resistor Side
-      // Imax = (2.495)/100000 ~= 24.95uA
-      // Rmax(sensor) = 3.3/Imax - 100000 ~= 66498
-      // Vsensor = Imax*R
-      // Rsensor = Vsensor / Imax
-      // Rsensor ＝Vsensor / 10 / Imax
       // OpAmp Non-Inv
       // Isensor = 2.495 / (100000 + Rsensor)
       // Vsensor = Isensor * Rsense
       // Rsensor(LowSide) = (Vsensor / Gain * 100000) / (2.495 - Vsensor / Gain)
       // Rsensor(HighSide) = (2.495 * R2 - Vsensor * R2) / Vsensor
-
       uint16_t *adcVoltageRange;
+      uint8_t adc_att = 11;
       adcVoltageRange = &config.adc_volt_11db;
       analogSetPinAttenuation(config.pin_sensor, ADC_11db);      
       if (analogRead(config.pin_sensor) <= 1100)
       {
+          adc_att = 0;
           adcVoltageRange = &config.adc_volt_0db;
           analogSetPinAttenuation(config.pin_sensor, ADC_0db);
       } else if (analogRead(config.pin_sensor) <= 2200)
       {
+          adc_att = 6;
           adcVoltageRange = &config.adc_volt_6db;
           analogSetPinAttenuation(config.pin_sensor, ADC_6db);
       }
       bool calibrateMode = (*adcVoltageRange & 0x8000) == 0x8000;
+      static uint32_t last_sensor_adc = 0xffffffff;
+      static uint8_t last_adc_att = 0;
       uint32_t sensor_adc = 0;
-      uint16_t sensor_adcValues[32];
-      for (int i = 0; i < 32; i++)
+      uint16_t sensor_adcValues[64];
+      for (int i = 0; i < 64; i++)
       {
           sensor_adcValues[i] = analogRead(config.pin_sensor);
       }
       qsort(sensor_adcValues, 32, sizeof(uint16_t), uint16_cmpfunc);
-      for (int i = 8; i < 24; i++)
+      for (int i = 24-8; i < 24+8; i++)
       {
           sensor_adc += sensor_adcValues[i];
       }
       sensor_adc >>= 3;
+
+      if (last_sensor_adc == 0xffffffff || last_adc_att != adc_att)
+      {
+          last_adc_att = adc_att;
+          last_sensor_adc = sensor_adc;
+      }
       if (calibrateMode)
       {
-          Serial.printf("In Calibrate Mode, full range = %d\n", (int)((*adcVoltageRange & 0x7fff) * 8191. / sensor_adc));
-          *adcVoltageRange = (*adcVoltageRange & 0x7fff) * 8191. / sensor_adc;
+          // First-order filters in calibration mode
+          sensor_adc = sensor_adc * 0.3 + 0.7 * last_sensor_adc;
+          printLog(LOG_INFO, "In Calibrate Mode, full range = %d mV Calibrate Voltage: %.05f\n", (int)((*adcVoltageRange & 0x7fff) * 8191. / sensor_adc)/10, (*adcVoltageRange & 0x7fff) / 10000.);
+          *adcVoltageRange = (*adcVoltageRange & 0x7fff) * 8191. / sensor_adc / 10;
           if (cfg_get_backend_t() == STORAGE_NVS)
           {
               cfg_save(def_cfg, true);
@@ -1610,28 +1656,37 @@ void loop() {
           }
           sendMeta();
       }
+      last_sensor_adc = sensor_adc;
       float voltageRange = (*adcVoltageRange & 0x7fff) / 1000.;
       
       sensor_bright = (8191-sensor_adc * (voltageRange / 3.6)) / 8191. * 100;
-      target_bright = config.bright;
       float Vsensor = (sensor_adc / 8191. * voltageRange);
-      float Rsensor = (config.sensor_ref/1000. * config.sensor_ref_r1 - Vsensor * config.sensor_ref_r1) / Vsensor;
+      if (config.adc_ax != 0)
+      {
+          Vsensor = Vsensor * config.adc_ax + config.adc_b;
+      }
+//      float Rsensor = (config.sensor_ref/1000. * config.sensor_ref_r1 - Vsensor * config.sensor_ref_r1) / Vsensor;
+      float Rsensor = (Vsensor * config.sensor_ref_r1) / (config.sensor_ref / 1000. - Vsensor);  // In Low Side
       float lumen = config.sensor_ax * pow(Rsensor, config.sensor_b);
-      sensor_bright = lumen / config.max_lm * 100;
-      if (sensor_bright >= 100) sensor_bright = 100;
-      target_bright = config.bright;
-      pidControl.run();
+      
+      if (config.max_lm != 0)
+      {
+          sensor_bright = lumen / config.max_lm * 100;
+          if (sensor_bright >= 100) sensor_bright = 100;
+          target_bright = config.bright;
+          pidControl.run();
+          updatePWMValue(pidBright, config.mode_ch2 == 0 ? config.ct_abx : pidBright * config.ct_abx / 100.);
+      }
 
       if (realtime_data){
-          sprintf(msg_buf, "{\"current_bright\":%f,\"action\":%f,\"lumen\":%f,\"target_lumen\":%f,\"adc_voltage\":%f,\"resistor\":%f}", sensor_bright, pidBright, lumen,config.bright/100.*config.max_lm,Vsensor, Rsensor);
+          sprintf(msg_buf, "{\"current_bright\":%f,\"action\":%f,\"lumen\":%f,\"target_lumen\":%f,\"adc_voltage\":%.04f,\"resistor\":%f,\"adc_attenuation\":%d}", sensor_bright, pidBright, isnan(lumen) || isinf(lumen) ? -1 : lumen,config.bright/100.*config.max_lm,Vsensor, Rsensor, adc_att);
           client.publish("callback", msg_buf);
       }
       
-//      (vSensor/11 * 100000)/(2.495 - vSensor / 11));
-      updatePWMValue(pidBright, config.mode_ch2 == 0 ? config.ct_abx : pidBright * config.ct_abx / 100.);
       lastSensorDetect = currentMillis;
     }
-    if (reconnect()) {//确保连上服务器，否则一直等待。
+#endif
+    if (check_connect(mqtt_cls, &client, on_mqtt_connected)) {//确保连上服务器，否则一直等待。
       client.loop();//MUC接收数据的主循环函数。
       long rssi = WiFi.RSSI();
        if (last_state != config.bright || (abs(rssi - last_rssi) >= 3 && currentMillis - last_send_rssi >= 5000))
@@ -1643,13 +1698,13 @@ void loop() {
           {
               if (config.mode_ch2 == 0)
               {
-                  sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, currentMillis);
+                  sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, time(NULL));
               } else 
               {
-                  sprintf(msg_buf, "{\"bright\":%d,\"bright2\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, currentMillis);
+                  sprintf(msg_buf, "{\"bright\":%d,\"bright2\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, time(NULL));
               }
           } else {
-              sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, rssi, VERSION, currentMillis);
+              sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, rssi, VERSION, time(NULL));
           }
           client.publish("status", msg_buf);
        }
@@ -1660,4 +1715,21 @@ void loop() {
           sendMeta();
        }
     }
+#ifdef LED0_PIN
+    uint8_t ledPeriod = (config.led_feature >> 4) == 0 ? 0 : 255;
+    if ((config.led_feature >> 4) & 0x1) // WiFi Status
+    {
+        ledPeriod = WiFi.status() == WL_CONNECTED ? 255 : 0;
+    }
+    if ((config.led_feature >> 4) & 0x2) // Channel Bright
+    {
+        ledPeriod &= (uint8_t)(config.bright / 100. * 255);
+    }
+    if ((config.led_feature >> 4) & 0x4) // Breath Light
+    {
+//        ledPeriod &= (uint8_t)((abs((int32_t)(millis() % 1000) - 500)) * 255 / 500);
+        ledPeriod = ledPeriod * ((abs((int32_t)(millis() % 1000) - 500)) / 500.);
+    }
+    ledcWrite(3, 255 - ledPeriod);
+#endif
 }

@@ -3,14 +3,23 @@
   #include <nvs.h>
   #include <SPIFFS.h>
   #include <WiFi.h>
+  #include <esp_task_wdt.h>
+  #include <rom/rtc.h>
+  #define ESPhttpUpdate httpUpdate
+  #include <HTTPUpdate.h>
 #else
   #include <FS.h>
   #include <ESP8266WiFi.h>
+  #include <ESP8266httpUpdate.h>
 #endif
 #include "config.h"
 
 static char *cfg_buffer = NULL;
 static enum cfg_storage_backend_t cfg_backend;
+static mqtt_callback on_message = NULL;
+static cfg_callback  on_cfgUpdate = NULL;
+static char *global_msg_buf = NULL;
+static PubSubClient *global_client;
 
 char *dev_name;
 char *ssid;
@@ -25,7 +34,7 @@ nvs_handle nvs;
 #ifdef MIGRATE_ENABLED
 bool cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
 {
-    Serial.printf("Migrate Config From SPIFFS to NVS\n");
+    printLog(LOG_INFO, "Migrate Config From SPIFFS to NVS\n");
 
     nvs_set_str(nvs, "class", mqtt_cls);
     
@@ -33,7 +42,7 @@ bool cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
     
     if (f.read((uint8_t *)cfg_buffer, BUFFER_SIZE) != BUFFER_SIZE)
     {
-        Serial.printf("ERROR: Migrate config failed, buffer size not matched.\n");
+        printLog(LOG_ERROR, "ERROR: Migrate config failed, buffer size not matched.\n");
         cfg_buffer[0] = '\0';
         f.close();
         SPIFFS.remove("/config.bin");
@@ -56,7 +65,7 @@ void cfg_begin()
 #ifdef CFG_DEBUG
     nvs_stats_t nvs_stats;
     nvs_get_stats("nvs", &nvs_stats);
-    Serial.printf("NVS Status: Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)\n",
+    printLog(LOG_INFO, "NVS Status: Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)\n",
           nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
 #endif
     int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
@@ -116,7 +125,7 @@ void cfg_begin()
         int r;
         if ((r = f.read((uint8_t *)cfg_buffer, BUFFER_SIZE)) != BUFFER_SIZE)
         {
-            Serial.printf("Read config failed, read: %d\n", r);
+            printLog(LOG_ERROR, "Read config failed, read: %d\n", r);
         }
         f.close();
     }
@@ -188,7 +197,7 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
     {
       if (strncmp(cfg_buffer, mqtt_cls, strlen(mqtt_cls)) != 0)
       {
-        Serial.printf("INVALID CONFIG HEADER, RESET CONFIG FILES: \"%s\" != \"%s\"\n", mqtt_cls, cfg_buffer);
+        printLog(LOG_FATAL, "INVALID CONFIG HEADER, RESET CONFIG FILES: \"%s\" != \"%s\"\n", mqtt_cls, cfg_buffer);
         cfg_init(mqtt_cls, def_value, true);
         return false;
       }
@@ -207,13 +216,13 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
 
 void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
 {
-    Serial.printf("Initalize configure\n");
+    printLog(LOG_INFO, "Initalize configure\n");
     if (cfg_backend == STORAGE_NVS)
     {
 #ifdef ESP_NVS_H
         int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
         if (rc != ESP_OK) {
-            Serial.printf("ERROR: Initalize NVS core failed\n");
+            printLog(LOG_FATAL, "ERROR: Initalize NVS core failed\n");
             return;
         }
         nvs_set_str(nvs, "class", mqtt_cls);
@@ -296,10 +305,10 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
 #ifdef CFG_DEBUG
         if (def_value[i].size == 0)
         {
-            Serial.printf("Initalize %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
+            printLog(LOG_INFO, "Initalize %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
         } else 
         {
-            Serial.printf("Initalize %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
+            printLog(LOG_INFO, "Initalize %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
         }
 #endif
     }
@@ -319,7 +328,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
         f.write(cfg_buffer, BUFFER_SIZE);
 #endif
         f.close();
-        Serial.printf("Init save %s\n", SPIFFS.exists("/config.bin") ? "Success" : "Failed");
+        printLog(LOG_INFO, "Init save %s\n", SPIFFS.exists("/config.bin") ? "Success" : "Failed");
     } else 
     {
         EEPROM.commit();
@@ -328,7 +337,23 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
 
 uint16_t boot_count_increase()
 {
-    uint16_t boot_count = 0;
+    uint8_t boot_count = 0;
+#if ARDUINO_ARCH_ESP32
+    if (cfg_backend == STORAGE_NVS)
+    {
+        int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
+        if (rc != ESP_OK) return false;
+        if (ESP_OK != nvs_get_u8(nvs, "bootcount", &boot_count))
+        {
+            boot_count = 0;
+        }
+        boot_count++;
+        nvs_set_u8(nvs, "bootcount", boot_count);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+        return boot_count;
+    }else 
+#endif
     if (cfg_backend == STORAGE_SPIFFS)
     {
         File f = SPIFFS.open("/bootcount.txt", "r");
@@ -355,6 +380,16 @@ uint16_t boot_count_increase()
 void boot_count_reset()
 {
     uint16_t boot_count;
+#if ARDUINO_ARCH_ESP32
+    if (cfg_backend == STORAGE_NVS)
+    {
+        int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
+        if (rc != ESP_OK) return;
+        nvs_erase_key(nvs, "bootcount");
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }else 
+#endif
     if (cfg_backend == STORAGE_SPIFFS)
     {
         File f = SPIFFS.open("/bootcount.txt", "w");
@@ -442,16 +477,16 @@ int cfg_read_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize
         switch (rc)
         {
             case ESP_ERR_NVS_NOT_FOUND:
-                Serial.printf("NVS ERROR: %s ESP_ERR_NVS_NOT_FOUND\n", def_value[index].nvs_name);
+                printLog(LOG_ERROR, "NVS ERROR: %s ESP_ERR_NVS_NOT_FOUND\n", def_value[index].nvs_name);
                 break;
             case ESP_ERR_NVS_INVALID_HANDLE:
-                Serial.printf("NVS ERROR: %s ESP_ERR_NVS_INVALID_HANDLE\n", def_value[index].nvs_name);
+                printLog(LOG_ERROR, "NVS ERROR: %s ESP_ERR_NVS_INVALID_HANDLE\n", def_value[index].nvs_name);
                 break;
             case ESP_ERR_NVS_INVALID_NAME:
-                Serial.printf("NVS ERROR: %s ESP_ERR_NVS_INVALID_NAME\n", def_value[index].nvs_name);
+                printLog(LOG_ERROR, "NVS ERROR: %s ESP_ERR_NVS_INVALID_NAME\n", def_value[index].nvs_name);
                 break;
             case ESP_ERR_NVS_INVALID_LENGTH:
-                Serial.printf("NVS ERROR: %s ESP_ERR_NVS_INVALID_LENGTH\n", def_value[index].nvs_name);
+                printLog(LOG_ERROR, "NVS ERROR: %s ESP_ERR_NVS_INVALID_LENGTH\n", def_value[index].nvs_name);
                 break;
         }
         
@@ -563,7 +598,7 @@ bool cfg_load(const hp_cfg_t *def_value)
                     size_t required_size = 0;
                     if (cfg_read_string(def_value, i, (char *)(cfg_buffer + def_value[i].offset), 0) == -1)
                     {
-                        Serial.printf("Failed to read NVS key %s\n", def_value[i].nvs_name);
+                        printLog(LOG_ERROR, "Failed to read NVS key %s\n", def_value[i].nvs_name);
                         goto failed;
                         return false;
                     }
@@ -588,10 +623,10 @@ bool cfg_load(const hp_cfg_t *def_value)
 #ifdef CFG_DEBUG
         if (def_value[i].size == 0)
         {
-            Serial.printf("Loading %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
+            printLog(LOG_DEBUG, "Loading %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
         } else 
         {
-            Serial.printf("Loading %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
+            printLog(LOG_DEBUG, "Loading %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
         }
 #endif
     }
@@ -705,10 +740,10 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
 #ifdef CFG_DEBUG
         if (def_value[i].size == 0)
         {
-            Serial.printf("Saving %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
+            printLog(LOG_DEBUG, "Saving %s[%d:%d] -> \"%s\"\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+strlen(*(char **)def_value[i].assign), *(char **)def_value[i].assign);
         } else 
         {
-            Serial.printf("Saving %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
+            printLog(LOG_DEBUG, "Saving %s[%d:%d] -> %ld\n", def_value[i].nvs_name, def_value[i].offset, def_value[i].offset+def_value[i].size, storage_value);
         }
 #endif
     }
@@ -740,7 +775,8 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
 {
   char *p;
   char chEEP;
-  
+
+  global_msg_buf = msg_buf;
   if (strlen(ssid) == 0)
   {
       WiFi.mode(WIFI_AP);
@@ -751,11 +787,34 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
 //#ifdef ARDUINO_ARCH_ESP8266
 //      WiFi.softAPConfig(IPAddress(192,168,32,1), IPAddress(192,168,32,1), IPAddress(255, 255, 255, 0)); // Set AP Address
 //#endif
+      printLog(LOG_INFO, "Startup WiFi Station...\n");
       while(!WiFi.softAP(mqtt_cls)){ delay(10); yield(); }; // Startup AP
+      printLog(LOG_INFO, "Startup Telet Server...\n");
  
       WiFiServer telnetServer(23);
       WiFiClient telnetClient;
 
+      // if you are connected, scan for available WiFi networks and print the number discovered:
+      Serial.println("** Scan Networks **");
+      byte numSsid = WiFi.scanNetworks();
+      if (numSsid != WIFI_SCAN_FAILED)
+      {
+          Serial.print("Number of available WiFi networks discovered:");
+          Serial.println(numSsid);
+          for (int i = 0; i < numSsid; ++i) {
+              // Print SSID and RSSI for each network found
+              Serial.printf("  %d: ", i + 1);
+              Serial.print(WiFi.SSID(i));
+              Serial.print(" (");
+              Serial.print(WiFi.RSSI(i));
+              Serial.print(")");
+#if ARDUINO_ARCH_ESP32
+              Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
+#endif
+              delay(10);
+          }
+      }
+         
       telnetServer.begin(23);
 ssid_input:
       Serial.print("Please input SSID: ");
@@ -796,6 +855,10 @@ ssid_input:
               chEEP = Serial.read();
               *p++ = chEEP == '\n' || chEEP == '\r' ? '\0' : chEEP;
           }
+      }
+      if (strlen(ssid) <= 2 && atoi(ssid) != 0)
+      {
+          strcpy(ssid, WiFi.SSID(atoi(ssid)-1).c_str());
       }
       if (telnetClient)
       {
@@ -923,6 +986,7 @@ ssid_input:
   WiFi.setHostname(mqtt_cls);
 #endif
   WiFi.begin(ssid, password);
+  WiFi.setAutoReconnect(true);
 }
 
 void cfg_reset(const hp_cfg_t *def_value)
@@ -952,5 +1016,272 @@ void cfg_reset(const hp_cfg_t *def_value)
             EEPROM.write(i, 0);
         }
         EEPROM.commit();
+    }
+}
+
+
+const char* szWlStatusToStr(wl_status_t wlStatus)
+{
+  switch (wlStatus)
+  {
+  case WL_NO_SHIELD: return "WL_NO_SHIELD";
+  case WL_IDLE_STATUS: return "WL_IDLE_STATUS";
+  case WL_NO_SSID_AVAIL: return "WL_NO_SSID_AVAIL";
+  case WL_SCAN_COMPLETED: return "WL_SCAN_COMPLETED";
+  case WL_CONNECTED: return "WL_CONNECTED";
+  case WL_CONNECT_FAILED: return "WL_CONNECT_FAILED";
+  case WL_CONNECTION_LOST: return "WL_CONNECTION_LOST";
+  case WL_DISCONNECTED: return "WL_DISCONNECTED";
+  default: return "Unknown";
+  }
+}
+
+
+void sendBufferedLog(PubSubClient *client)
+{
+    log_chain_t *p = log_chain;
+    while (p != NULL)
+    {
+        if (client->connected())
+        {
+            client->publish("log", p->data);
+            log_chain_buffer -= p->len;
+            free(p->data);
+            log_chain_t *q = p;
+            p = p->next;
+            log_chain = p;
+            free(q);
+            if (p == NULL)
+            {
+                log_chain = NULL;
+                log_chain_tail = NULL;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+
+bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)) { //等待，直到连接上服务器
+  static uint32_t disconnectTime = 0;
+  static wl_status_t lastWiFiStatus = WL_NO_SHIELD;
+  static int retry_failed_count = 0;
+  static uint32_t lastWiFiDebugMessage = 0;
+  wl_status_t wifiStatus = WiFi.status();
+
+  // Disconnected -> CONNECT_FAILED -> WL_NO_SHIELD -> WL_DISCONNECTED
+  if (wifiStatus != lastWiFiStatus && wifiStatus != WL_IDLE_STATUS)
+  {
+      if (wifiStatus == WL_CONNECTION_LOST)
+      {
+          disconnectTime = millis();
+          WiFi.disconnect();
+          printLog(LOG_INFO, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
+      } else if (wifiStatus == WL_CONNECT_FAILED) {
+          disconnectTime = millis();
+          printLog(LOG_ERROR, "\nWiFi: WL_CONNECT_FAILED, disable wifi");
+          if(!WiFi.enableSTA(false)) {
+              printLog(LOG_FATAL, "WiFi: STA disable failed! Force reset system!!\n");
+              ESP.restart();
+              return false;
+          }
+      } else if (wifiStatus == WL_NO_SHIELD)
+      {
+          disconnectTime = millis();
+          printLog(LOG_INFO, "\nWiFi: %s, waiting", szWlStatusToStr(wifiStatus));
+      } else if (wifiStatus == WL_DISCONNECTED || wifiStatus == WL_NO_SSID_AVAIL) {
+          disconnectTime = millis();
+          WiFi.reconnect();
+          printLog(LOG_INFO, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
+      }else if (wifiStatus != WL_CONNECTED) {
+          printLog(LOG_INFO, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
+      } else 
+      {
+          disconnectTime = 0;
+          IPAddress myAddress = WiFi.localIP();
+          printLog(LOG_INFO, "\nWiFi: Connected, IP: %s\n", myAddress.toString().c_str());
+//          Serial.print(myAddress);
+//          Serial.printf("\n");
+      }
+      lastWiFiStatus = wifiStatus;
+  }
+  if (wifiStatus == WL_NO_SHIELD && millis() - disconnectTime >= 2000)
+  {
+      disconnectTime = millis();
+      printLog(LOG_INFO, "\nWiFi: %s, reset wifi", szWlStatusToStr(wifiStatus));
+      if(!WiFi.enableSTA(true)) {
+          printLog(LOG_FATAL, "WiFi: STA enable failed! Force reset system!!\n");
+          ESP.restart();
+          return false;
+      }
+  }
+  if (wifiStatus != WL_CONNECTED && millis() - lastWiFiDebugMessage >= 250)
+  {
+      Serial.printf(".");
+      lastWiFiDebugMessage = millis();
+  }
+  if (wifiStatus != WL_CONNECTED && millis() - disconnectTime >= 30000) {
+      printLog(LOG_FATAL, "\nWiFi: Status = %d (Disconnected), RESET SYSTEM\n", wifiStatus);
+      ESP.restart();
+  }
+  if (wifiStatus == WL_CONNECTED && !client->connected()){
+      printLog(LOG_INFO, "MQTT: Connecting to %s:%d, state: %d\n", mqtt_server, port, client->state());
+#ifdef ARDUINO_ARCH_ESP32
+      esp_task_wdt_init(30, true);
+      esp_task_wdt_add(NULL);
+#endif
+      if (client->connect(mqtt_cls)) {//接入时的用户名，尽量取一个很不常用的用户名
+        retry_failed_count = 0;
+        printLog(LOG_INFO, "MQTT: Connected, login by: %s\n",mqtt_cls);
+  #ifdef ARDUINO_ARCH_ESP32
+        esp_task_wdt_delete(NULL);
+        esp_task_wdt_deinit();
+  #endif
+        if (onConnect != NULL) onConnect();
+      } else {
+  #ifdef ARDUINO_ARCH_ESP32
+        esp_task_wdt_reset();
+  #endif
+        retry_failed_count++;
+        printLog(LOG_ERROR, "MQTT: Connect failed, rc=%d\n", client->state());//连接失败
+        client->disconnect();
+        delay(1000);
+        if (retry_failed_count >= 10)
+        {
+            printLog(LOG_FATAL, "MQTT: Reconnect Too many times, RESET SYSTEM\n");
+            ESP.restart();
+        }
+      }
+  }
+  if (client->connected())
+  {
+      sendBufferedLog(client);
+  }
+  return wifiStatus == WL_CONNECTED && client->connected();
+}
+
+
+void cfg_initalize_info(size_t size_conf)
+{
+#ifdef ARDUINO_ARCH_ESP8266
+  rst_info *resetInfo;
+  resetInfo = ESP.getResetInfoPtr();
+  Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
+  printLog(LOG_INFO, "Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
+#elif ARDUINO_ARCH_ESP32
+  printLog(LOG_INFO, "Reset Reason: %d / %d\n", rtc_get_reset_reason(0), rtc_get_reset_reason(1));
+//  Serial.printf("RTC Reset Reason: %d\n", rtc_get_reset_reason());
+  Serial.printf("CPU Speed: %d MHz  XTAL: %d MHz  APB: %d Hz\n", getCpuFrequencyMhz(), getXtalFrequencyMhz(), getApbFrequency());
+#endif
+    printLog(LOG_INFO, "Build Date: %s %s  Board: %s  CFG FROM %s SIZE: %d\n", __DATE__, __TIME__, ARDUINO_BOARD, cfg_get_backend(), size_conf);
+//    Serial.printf("WiFi: AutoConnect: %d  AutoReconnect: %d\n", WiFi.getAutoConnect(), WiFi.getAutoReconnect());
+}
+
+
+void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用于接收数据
+  int l=0;
+  int p=1;
+  if (on_message != NULL && on_message(topic, payload, length) == true) return;
+  if (strcmp(topic, "ota") == 0)
+  {
+    WiFiClient ota_client;
+
+    char bufferByte = payload[length];
+    payload[length] = 0;
+    printLog(LOG_INFO, "Start OTA from URL: %s\n", (char *)payload);
+    t_httpUpdate_return ret = ESPhttpUpdate.update(ota_client, (char *)payload);
+
+    payload[length] = bufferByte;
+
+    switch (ret) {
+      case HTTP_UPDATE_FAILED:
+        sprintf(global_msg_buf, "{\"ota\":\"%s\"}", ESPhttpUpdate.getLastErrorString().c_str());
+        global_client->publish("status", global_msg_buf);
+        printLog(LOG_FATAL, "HTTP_UPDATE_FAILD Error (%d): %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
+        ESP.restart();
+        break;
+
+      case HTTP_UPDATE_NO_UPDATES:
+        sprintf(global_msg_buf, "{\"ota\":\"no updates\"}");
+        global_client->publish("status", global_msg_buf);
+        printLog(LOG_ERROR, "HTTP_UPDATE_NO_UPDATES");
+        ESP.restart();
+        break;
+
+      case HTTP_UPDATE_OK:
+        sprintf(global_msg_buf, "{\"ota\":\"success\"}");
+        global_client->publish("status", global_msg_buf);
+        printLog(LOG_INFO, "HTTP_UPDATE_OK");
+        ESP.restart();
+        break;
+    }
+  } else if (strcmp(topic, "setName") == 0)
+  {
+      if (length < 32)
+      {
+          strncpy(dev_name, (const char *)payload, length);
+          dev_name[length] = 0;
+          printLog(LOG_INFO, "Set Device Name to %s\n", dev_name);
+      }
+      if (on_cfgUpdate != NULL)
+      {
+          on_cfgUpdate();
+      }
+  } else if (strcmp(topic, "reboot") == 0)
+  {
+      ESP.restart();
+  }
+}
+
+void init_mqtt_client(PubSubClient *client, mqtt_callback callback, cfg_callback OnCfgUpdate)
+{
+    on_message = callback;
+    on_cfgUpdate = OnCfgUpdate;
+    global_client = client;
+    client->setServer((const char *)mqtt_server, port);//端口号
+    client->setCallback(cfg_mqtt_callback);
+}
+
+
+void printLog(int debugLevel, char *fmt, ...)
+{
+    va_list arglist;
+    /* Initializing arguments to store all values after num */
+    va_start ( arglist, fmt );
+    size_t needed = vsnprintf(NULL, 0, fmt, arglist);
+    char *buffer = (char *)malloc(needed+1+13);  // 2KB Buffer
+    if (buffer == NULL) return;
+    char *p = buffer + sprintf(buffer, "%ld|%d|", millis(), debugLevel);
+    // buffer
+    vsprintf( p, fmt, arglist );
+    Serial.printf("%s", p);
+    va_end ( arglist );                  // Cleans up the list
+    
+    if (log_chain_buffer + needed <= 4096)   // Max 4K Log Buffer
+    {
+        log_chain_t *node = (log_chain_t *)calloc(1, sizeof(log_chain_t));
+        if (node == NULL)
+        {
+            free(buffer);
+            Serial.printf("Log: Buffer Overflowed\n");
+            return;
+        }
+        node->data = buffer;
+        node->len = needed;
+        node->next = NULL;
+        
+        if (log_chain_tail == NULL)
+        {
+            log_chain = node;
+            log_chain_tail = node;
+        }else {
+            log_chain_tail->next = node;
+            log_chain_tail = node;
+        }
+        log_chain_buffer += needed;
+    } else {
+        free(buffer);
+        Serial.printf("Log: Buffer Full\n");
     }
 }

@@ -10,11 +10,35 @@
 //#define MIGRATE_ENABLED
 //#define CFG_DEBUG
 
+#include <PubSubClient.h>
+#include <stdarg.h>
+
+#define   LOG_FATAL   5
+#define   LOG_ERROR   4
+#define   LOG_WARNING 3
+#define   LOG_INFO   2
+#define   LOG_DEBUG   1
+
+typedef bool (*mqtt_callback)(char* topic, byte* payload, unsigned int length);
+typedef void (*cfg_callback)();
+
 extern char *dev_name;
 extern char *ssid;
 extern char *password;
 extern char *mqtt_server;//服务器的地址
-extern uint16_t port;//服务器端口号 
+extern uint16_t port;//服务器端口号
+
+typedef struct log_chain_s log_chain_t;
+
+struct log_chain_s {
+    char *data;
+    int  len;
+    log_chain_t *next;
+};
+
+static log_chain_t *log_chain = NULL;
+static log_chain_t *log_chain_tail = NULL;
+static int          log_chain_buffer = 0;
 
 enum cfg_storage_backend_t {
     STORAGE_NVS,
@@ -181,6 +205,10 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
 //int cfg_write_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize);
 uint16_t boot_count_increase();
 void boot_count_reset();
+void cfg_initalize_info(size_t size_conf);
+bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void));
+void init_mqtt_client(PubSubClient *client, mqtt_callback callback, cfg_callback OnCfgUpdate);
+void printLog(int debugLevel, char *fmt, ...);
 
 #define CFG_CHECK() cfg_check(mqtt_cls, def_cfg)
 #define CFG_INIT(FULL_INIT) cfg_init(mqtt_cls, def_cfg, FULL_INIT)
