@@ -311,6 +311,7 @@ uint32_t PinToGPIOMux(uint8_t pin)
 
 bool isChannelInvert(uint8_t pin)
 {
+    if (pin == 101 || pin == 102) return false;
     if (config.work_mode == 0)
     {
         if (pin == config.pin_ch1) return false;
@@ -874,6 +875,13 @@ void onCfgUpdated()
     sendMeta();
 }
 
+
+bool isBoardResMatch(int rHigh, int rLow, float volt)
+{
+    float accurateVoltage = 3.3 / (rHigh + rLow) * rLow;
+    return accurateVoltage * 0.98 <= volt && volt <= accurateVoltage * 1.02;
+}
+
 void setup() {
   uint16_t boot_count = 0;
 #ifdef DEBUG_TRIGGER_PIN
@@ -959,15 +967,29 @@ void setup() {
   if (!cfgCheck)
   {
 #if ARDUINO_ARCH_ESP32
+      float pin35Voltage = 0;
+      float adcVoltageRange = 3.6;
+      analogSetPinAttenuation(35, ADC_11db);
+      if (analogRead(35) <= 1100)
+      {
+          adcVoltageRange = 1.1;
+          analogSetPinAttenuation(35, ADC_0db);
+      } else if (analogRead(35) <= 2200)
+      {
+          adcVoltageRange = 2;
+          analogSetPinAttenuation(35, ADC_6db);
+      }
       uint16_t pin35_value = analogRead(35);
+      pin35Voltage = adcVoltageRange * pin35_value / 4095.;
       // >= V1.7.1 PCB Auto Settings
       pinMode(27, INPUT_PULLUP);
       pinMode(34, INPUT_PULLUP);
       pinMode(35, INPUT_PULLUP);
       delay(100);
       // >= V1.7.1 PCB Auto Settings
-      printLog(LOG_INFO, "AutoConf Resistor Value: %ld\n", pin35_value);
-      if (2400 <= pin35_value && pin35_value <= 2750) // 4.7k/10k with 5%
+      printLog(LOG_INFO, "AutoConf Resistor Value: %ld (%f V  Range = %f)\n", pin35_value, pin35Voltage, adcVoltageRange);
+
+      if (isBoardResMatch(4700, 10000, pin35Voltage)) // 2400 <= pin35_value && pin35_value <= 2750) // 4.7k/10k with 5%
       {
           printLog(LOG_INFO, "Auto Initalize by PCB Board - SCR Version\n");
           config.work_mode = 4;
@@ -979,7 +1001,7 @@ void setup() {
           config.pin_scr_trig = 5;
           config.pin_sensor = 32;
           CFG_SAVE();
-      } else if (1083 <= pin35_value && pin35_value <= 1150) // 1k/10k with 3%
+      } else if (isBoardResMatch(10000, 1000, pin35Voltage)) //1083 <= pin35_value && pin35_value <= 1150) // 1k/10k with 3%
       {
           printLog(LOG_INFO, "Auto Initalize by PCB Board - MOSRPC Version >= 2.5\n");
           config.work_mode = 4;
@@ -992,7 +1014,7 @@ void setup() {
           config.pin_sensor = 32;
           config.scr_driver = 1;
           CFG_SAVE();
-      } else if (1780 <= pin35_value && pin35_value <= 1970) // 10k/10k with 3%
+      } else if (isBoardResMatch(10000, 10000, pin35Voltage)) // 10k/10k with 3%
       {
           printLog(LOG_INFO, "Auto Initalize by PCB Board - MOSRPC Version\n");
           config.work_mode = 4;
@@ -1005,9 +1027,18 @@ void setup() {
           config.pin_sensor = 32;
           config.scr_driver = 1;
           CFG_SAVE();
-      } else if (1986 <= pin35_value && pin35_value <= 2108) // 2k/10k with 3%
+      } else if (isBoardResMatch(10000, 2000, pin35Voltage)) // 2k/10k with 3%
       {
           // 0-10V Version
+          printLog(LOG_INFO, "Auto Initalize by PCB Board - 0-10V Version\n");
+          config.work_mode = 0;
+          config.pin_ch1 = 101;
+          config.pin_ch2 = 102;
+          config.mode_ch2 = 1;
+          config.pin_en1 = 0;
+          config.pin_en2 = 0;
+          config.pin_sensor = 32;
+          CFG_SAVE();
       } else if (digitalRead(34) == HIGH)
       {
           printLog(LOG_INFO, "Auto Initalize by PCB Board - Dual CH\n");
@@ -1607,7 +1638,7 @@ void loop() {
       uint16_t *adcVoltageRange;
       uint8_t adc_att = 11;
       adcVoltageRange = &config.adc_volt_11db;
-      analogSetPinAttenuation(config.pin_sensor, ADC_11db);      
+      analogSetPinAttenuation(config.pin_sensor, ADC_11db);
       if (analogRead(config.pin_sensor) <= 1100)
       {
           adc_att = 0;

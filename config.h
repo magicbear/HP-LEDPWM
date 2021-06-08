@@ -36,9 +36,12 @@ struct log_chain_s {
     log_chain_t *next;
 };
 
+#ifdef ARDUINO_ARCH_ESP32
 static log_chain_t *log_chain = NULL;
 static log_chain_t *log_chain_tail = NULL;
 static int          log_chain_buffer = 0;
+static uint32_t     log_chain_magic = 0x22336543;
+#endif
 
 enum cfg_storage_backend_t {
     STORAGE_NVS,

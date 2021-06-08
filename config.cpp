@@ -994,12 +994,15 @@ void cfg_reset(const hp_cfg_t *def_value)
     if (cfg_backend == STORAGE_NVS) {
 #ifdef ESP_NVS_H
         int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
-        if (rc != ESP_OK) return;
+        if (rc != ESP_OK) {
+            printLog(LOG_ERROR, "Fatal to open NVS\n");
+            return;
+        }
         nvs_erase_key(nvs, "class");
         nvs_erase_key(nvs, "boot_count");
         for (int i = 0; def_value[i].offset != 0; i++)
         {
-//            Serial.printf("Erase Key: %s\n", def_value[i].nvs_name);
+            printLog(LOG_DEBUG, "Erase Key: %s\n", def_value[i].nvs_name);
             nvs_erase_key(nvs, def_value[i].nvs_name);
         }
         nvs_commit(nvs);
@@ -1039,6 +1042,7 @@ const char* szWlStatusToStr(wl_status_t wlStatus)
 
 void sendBufferedLog(PubSubClient *client)
 {
+#ifdef ARDUINO_ARCH_ESP32
     log_chain_t *p = log_chain;
     while (p != NULL)
     {
@@ -1060,6 +1064,7 @@ void sendBufferedLog(PubSubClient *client)
             break;
         }
     }
+#endif
 }
 
 
@@ -1089,7 +1094,7 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
       } else if (wifiStatus == WL_NO_SHIELD)
       {
           disconnectTime = millis();
-          printLog(LOG_INFO, "\nWiFi: %s, waiting", szWlStatusToStr(wifiStatus));
+          Serial.printf("\nWiFi: %s, waiting", szWlStatusToStr(wifiStatus));
       } else if (wifiStatus == WL_DISCONNECTED || wifiStatus == WL_NO_SSID_AVAIL) {
           disconnectTime = millis();
           WiFi.reconnect();
@@ -1109,7 +1114,7 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
   if (wifiStatus == WL_NO_SHIELD && millis() - disconnectTime >= 2000)
   {
       disconnectTime = millis();
-      printLog(LOG_INFO, "\nWiFi: %s, reset wifi", szWlStatusToStr(wifiStatus));
+      Serial.printf("\nWiFi: %s, reset wifi", szWlStatusToStr(wifiStatus));
       if(!WiFi.enableSTA(true)) {
           printLog(LOG_FATAL, "WiFi: STA enable failed! Force reset system!!\n");
           ESP.restart();
@@ -1170,6 +1175,15 @@ void cfg_initalize_info(size_t size_conf)
   Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
   printLog(LOG_INFO, "Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
 #elif ARDUINO_ARCH_ESP32
+//  if (log_chain_magic != 0x22336543 ||
+//      (rtc_get_reset_reason(0) == 12 && rtc_get_reset_reason(1) == 12) ||
+//      ((rtc_get_reset_reason(0) == 1 || rtc_get_reset_reason(0) == 12) && rtc_get_reset_reason(1) == 14))
+//  {
+//      log_chain = NULL;
+//      log_chain_tail = NULL;
+//      log_chain_buffer = 0;
+//      log_chain_magic = 0x22336543;
+//  }
   printLog(LOG_INFO, "Reset Reason: %d / %d\n", rtc_get_reset_reason(0), rtc_get_reset_reason(1));
 //  Serial.printf("RTC Reset Reason: %d\n", rtc_get_reset_reason());
   Serial.printf("CPU Speed: %d MHz  XTAL: %d MHz  APB: %d Hz\n", getCpuFrequencyMhz(), getXtalFrequencyMhz(), getApbFrequency());
@@ -1230,6 +1244,7 @@ void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//ç”¨äº
       }
   } else if (strcmp(topic, "reboot") == 0)
   {
+      printLog(LOG_INFO, "Remote reboot request\n");
       ESP.restart();
   }
 }
@@ -1258,6 +1273,7 @@ void printLog(int debugLevel, char *fmt, ...)
     Serial.printf("%s", p);
     va_end ( arglist );                  // Cleans up the list
     
+#ifdef ARDUINO_ARCH_ESP32
     if (log_chain_buffer + needed <= 4096)   // Max 4K Log Buffer
     {
         log_chain_t *node = (log_chain_t *)calloc(1, sizeof(log_chain_t));
@@ -1284,4 +1300,7 @@ void printLog(int debugLevel, char *fmt, ...)
         free(buffer);
         Serial.printf("Log: Buffer Full\n");
     }
+#else
+    free(buffer);
+#endif
 }
