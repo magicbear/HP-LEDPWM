@@ -345,7 +345,8 @@ void analogPinInit(int32_t freq, int32_t period, uint8_t pwm_pin)
         digitalWrite(pwm_pin, HIGH);
     } else if (pwm_pin == 101 || pwm_pin == 102) 
     {
-        dac_output_enable(pwm_pin == 101 ? DAC_CHANNEL_1 : DAC_CHANNEL_2);
+        digitalWrite(pwm_pin == 101 ? 25 : 26, LOW);
+        pinMode(pwm_pin == 101 ? 25 : 26, OUTPUT);
     } else if (pwm_pin == config.pin_ch1)
     {
         if (config.pwm_end == config.pwm_period)
@@ -422,12 +423,32 @@ void pwmWrite(uint8_t pwm_pin, int32_t duty)
 {
     if (isScrMode) return;
 #ifdef ARDUINO_ARCH_ESP32
-    if (pwm_pin == 101)
+    if (pwm_pin == 101 || pwm_pin == 102)
     {
-        dacWrite(25, duty * 255 / config.pwm_period);
-    } else if (pwm_pin == 102)
-    {
-        dacWrite(26, duty * 255 / config.pwm_period);
+        static bool dacEnabled[2] = {false, false};
+        if (duty * 255 / config.pwm_period == 0)
+        {
+            if (dacEnabled[pwm_pin - 101] == true)
+            {
+              dacEnabled[pwm_pin - 101] = false;
+              dac_output_disable(pwm_pin == 101 ? DAC_CHANNEL_1 : DAC_CHANNEL_2);
+#ifdef DEBUG_TIMER_PIN
+        digitalWrite(DEBUG_TIMER_PIN, LOW);
+#endif
+              pinMode(pwm_pin == 101 ? 25 : 26, OUTPUT);
+              digitalWrite(pwm_pin == 101 ? 25 : 26, LOW);
+            }
+        } else if (dacEnabled[pwm_pin - 101] == false)
+        {
+            dacEnabled[pwm_pin - 101] = true;
+            digitalWrite(pwm_pin == 101 ? 25 : 26, LOW);
+            dac_output_enable(pwm_pin == 101 ? DAC_CHANNEL_1 : DAC_CHANNEL_2);
+#ifdef DEBUG_TIMER_PIN
+        digitalWrite(DEBUG_TIMER_PIN, HIGH);
+#endif
+        }
+        if (dacEnabled[pwm_pin - 101])
+          dacWrite(pwm_pin == 101 ? 25 : 26, duty * 255 / config.pwm_period);
     } else if (pwm_pin == config.pin_ch1)
     {
         ledcWrite(0, duty);
@@ -879,7 +900,7 @@ void onCfgUpdated()
 bool isBoardResMatch(int rHigh, int rLow, float volt)
 {
     float accurateVoltage = 3.3 / (rHigh + rLow) * rLow;
-    return accurateVoltage * 0.98 <= volt && volt <= accurateVoltage * 1.02;
+    return accurateVoltage * 0.97 <= volt && volt <= accurateVoltage * 1.03;
 }
 
 void setup() {
@@ -1038,6 +1059,7 @@ void setup() {
           config.pin_en1 = 0;
           config.pin_en2 = 0;
           config.pin_sensor = 32;
+          config.pwm_end = 195;
           CFG_SAVE();
       } else if (digitalRead(34) == HIGH)
       {
@@ -1124,7 +1146,6 @@ void setup() {
   Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
 
   startupWifiConfigure(def_cfg, msg_buf, sizeof(msg_buf), mqtt_cls);
-  updatePWMValue(config.bright, config.ct_abx);
   
 //  ignoreOutput = true;
   Serial.printf("\n");
