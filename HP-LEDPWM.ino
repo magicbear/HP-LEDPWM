@@ -169,43 +169,6 @@ conf_t config;
   action; \
 }
 
-#ifdef MIGRATE_ENABLED
-const hp_cfg_t old_def_cfg[] = {
-  {31, sizeof(uint8_t), (uint8_t)10,      &config.bright, true, "bright"},        // BRIGHT
-  {32, 0, (uint8_t)0, &dev_name, true, "name"},                    // NAME LENGTH
-#ifdef ARDUINO_ARCH_ESP32
-  {60, sizeof(uint32_t), (uint32_t)20000, &config.pwm_freq, false, "pwm_freq"},   // UINT32: PWM FREQUENCE
-#else
-  {64, sizeof(uint16_t), (uint16_t)20000, &config.pwm_freq, false},   // UINT16: PWM FREQUENCE
-#endif
-  {66, sizeof(uint16_t), (uint16_t)0,     &config.pwm_start, false, "pwm_start"},       // UINT16: PWM START
-  {68, sizeof(uint16_t), (uint16_t)200,   &config.pwm_end, false, "pwm_end"},         // UINT16: PWM END
-  {70, sizeof(uint16_t), (uint16_t)4100,  &config.ct_abx, false, "ct_abx"},          // UINT16: COLOR TEMPERATURE / BRIGHT 2
-  {72, sizeof(uint16_t), (uint16_t)200,   &config.pwm_period, false, "pwm_period"},      // UINT16: PWM PERIOD
-  {74, sizeof(uint8_t), (uint8_t)0,   &config.pin_ch1, false, "pin_ch1"},             // UINT8:  config.pin_ch1    Single-CH / Warm LED PIN
-  {75, sizeof(uint8_t), (uint8_t)0,   &config.pin_ch2, false, "pin_ch2"},            // UINT8:  config.pin_ch2   White LED PIN
-  {76, sizeof(uint8_t), (uint8_t)1,   &config.work_mode, false, "mode"},           // UINT8:  MODE   0 NON-INVERT  1 INVERT  2 SCR NON-INVERT  3 SCR INVERT
-  {77, sizeof(uint8_t), (uint8_t)0,   &config.pin_scr_trig, false, "pin_scr_trig"},     // UINT8:  SCR MODE ZeroDetect Pin
-  {78, sizeof(int16_t), (int16_t)0,   &config.scr_delay, false, "scr_delay"},       // UINT16: SCR MODE ZeroDetect DELAY
-  {80, sizeof(uint8_t), (uint8_t)0,   &config.pin_reset, false, "cfg_reset"},       // UINT8:  RESET PIN
-  {81, sizeof(uint8_t), (uint8_t)0,   &config.pin_en1, false, "pin_en1"},             // UINT8:  EN PIN
-  {82, sizeof(uint8_t), (uint8_t)1,   &config.auto_fp, false, "auto_fp"}, // UINT8:  AUTO FULL POWER
-  {83, sizeof(uint8_t), (uint8_t)0,   &config.pin_en2, false, "pin_en2"},             // UINT8:  EN PIN
-  {84, sizeof(uint16_t), (uint16_t)500, &config.startup_smooth, true, "startup_smooth"},    // UINT16: STARTUP SMOOTH INTERVAL
-  {86, sizeof(uint8_t), (uint8_t)0,   &config.pwm_src, false, "pwm_src"},             // UINT8:  config.pwm_src
-  {87, sizeof(uint8_t), (uint8_t)0,   &config.pwm_src_duty, false, "pwm_src_duty"},             // UINT8:  config.pwm_src
-  {88, sizeof(uint8_t), (uint8_t)0,   &config.pin_adc_bright, false, "pin_adc_bright"},             // UINT8:  config.pin_adc_bright
-  {89, sizeof(uint8_t), (uint8_t)0,   &config.autosave, false, "b_autosave"},             // UINT8:  config.autosave
-  {90, sizeof(uint8_t), (uint8_t)0,   &config.mode_ch2, false, "ch2_mode"},             // UINT8:  config.mode_ch2
-  {91, sizeof(int8_t), (int8_t)5,     &config.scr_prerelease, false, "scr_prerelease"},             // UINT8:  SCR_PRERELEASE
-  {96, 0, (uint8_t)0, &ssid, true, "ssid"},                    // STRING: SSID
-  {128, 0, (uint8_t)0, &password, true, "password"},                   // STRING: WIFI PASSWORD 
-  {160, 0, (uint8_t)0, &mqtt_server, true, "mqtt_srv"},        // STRING: MQTT SERVER
-  {192, sizeof(uint16_t), (uint16_t)1234, &port, true, "mqtt_port"},             // UINT16: PORT
-  {NULL, 0,0, NULL, false, NULL}
-};
-#endif
-
 const hp_cfg_t def_cfg[] = {
     AUTO_CONF(reversion, 1, false),
     AUTO_CONF(bright, 10, true),
@@ -1019,23 +982,6 @@ void setup() {
   {
       CFG_INIT(true);
   }
-#ifdef MIGRATE_ENABLED
-  if (config.reversion != 1)
-  {
-      // Migrate from Old Version ** NOT FOR NVS **
-      printLog(LOG_INFO, "Migrate from Old Config Reversion: %d\n", config.reversion);
-      cfg_load(old_def_cfg);
-      config.reversion = def_cfg[0].data.uint8;
-      printLog(LOG_INFO, "Migrated config Reversion: %d\n", config.reversion);
-#ifdef ARDUINO_ARCH_ESP8266
-      // Migrate from old 16 bits to 32 bits
-      config.pwm_freq = config.pwm_freq & 0xffff;
-#endif
-      CFG_SAVE();
-      cfg_load(def_cfg);
-      printLog(LOG_INFO, "Migrated config Reversion: %d\n", config.reversion);
-  }
-#endif
   if (config.pwm_freq == 0 || config.pwm_period == 0)
   {
       printLog(LOG_ERROR, "Invalid PWM Frequence, reset configure\n");

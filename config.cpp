@@ -34,32 +34,6 @@ uint16_t port;//服务器端口号
 
 #ifdef ESP_NVS_H
 nvs_handle nvs;
-#ifdef MIGRATE_ENABLED
-bool cfg_migrate2nvs(const char *mqtt_cls, const hp_cfg_t *def_value)
-{
-    printLog(LOG_INFO, "Migrate Config From SPIFFS to NVS\n");
-
-    nvs_set_str(nvs, "class", mqtt_cls);
-    
-    File f = SPIFFS.open("/config.bin", "r");
-    
-    if (f.read((uint8_t *)cfg_buffer, BUFFER_SIZE) != BUFFER_SIZE)
-    {
-        printLog(LOG_ERROR, "ERROR: Migrate config failed, buffer size not matched.\n");
-        cfg_buffer[0] = '\0';
-        f.close();
-        SPIFFS.remove("/config.bin");
-        return false;
-    }
-    f.close();
-    cfg_backend = STORAGE_SPIFFS;
-    cfg_load(def_value);
-    cfg_backend = STORAGE_NVS;
-    cfg_save(def_value, false, true);
-    SPIFFS.remove("/config.bin");
-    return true;
-}
-#endif
 #endif
 
 void cfg_begin()
@@ -184,12 +158,6 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
         }
         if (!checkPass)
         {
-#ifdef MIGRATE_ENABLED
-            if (SPIFFS.begin(true) && SPIFFS.exists("/config.bin")) {
-              checkPass = cfg_migrate2nvs(mqtt_cls, def_value);
-            }
-            else 
-#endif
             cfg_init(mqtt_cls, def_value, true);
         }
         nvs_close(nvs);

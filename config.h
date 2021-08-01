@@ -7,7 +7,6 @@
   #error Please check config for ESP8266 compile params, required: SSL Support -> Basic SSL ciphers / Flash Size: with at least 32K SPIFFS
   #endif
 #endif
-//#define MIGRATE_ENABLED
 //#define CFG_DEBUG
 
 #ifdef ARDUINO_ARCH_ESP32
