@@ -1,6 +1,7 @@
 #ifdef ARDUINO_ARCH_ESP32
   #include <WiFi.h>
   #include <math.h>
+  #include <driver/adc.h>
   #include <driver/dac.h>
   #include <driver/ledc.h>
   #include <rom/rtc.h>
@@ -54,7 +55,7 @@ volatile scr_timing_t executeTiming, pendingTiming;
 
 #ifdef ARDUINO_ARCH_ESP32
   #define LED0_PIN 23
-  //#define LED1_PIN 22
+  #define LED1_PIN 22
   //#define DEBUG_TRIGGER_PIN 33
   //#define DEBUG_SAVE_PIN 33
   #define DEBUG_TIMER_PIN 33
@@ -62,7 +63,7 @@ volatile scr_timing_t executeTiming, pendingTiming;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "2.60"
+#define VERSION "2.71"
 
 #ifdef ARDUINO_ARCH_ESP8266
   #define PWM_CHANNELS 2
@@ -75,6 +76,7 @@ volatile scr_timing_t executeTiming, pendingTiming;
 
 #endif
 
+bool identifyMode = false;
 bool save_config = true;
 bool ignoreOutput = false;
 bool realtime_data = false;
@@ -147,6 +149,7 @@ typedef __attribute__((__packed__)) struct {
 #define KI_DIV 1000.
 #define KD_DIV 1000.
 
+int error_code = 0;
 
 conf_t config;
 #define AUTO_CONF(conf_name, default_value, init) { 32 + offsetof(conf_t, conf_name), sizeof(config.conf_name), default_value,  &config.conf_name, init, #conf_name }
@@ -483,15 +486,10 @@ void rebootSystem()
 //#endif
 }
 
-float mapfloat(float x, long in_min, long in_max, long out_min, long out_max)
-{
- return (float)(x - in_min) * (out_max - out_min) / (float)(in_max - in_min) + out_min;
-}
-
 void updatePWMValue(float set_state, float ct_abx)
 {
     int pwm_state = mapfloat(set_state, 0, 100, config.pwm_start, config.pwm_end);
-    if (pwm_state == config.pwm_start) pwm_state = 0;
+    if (pwm_state == config.pwm_start && config.auto_fp) pwm_state = 0;
     if (pwm_state == config.pwm_end && config.auto_fp) pwm_state = config.pwm_period;
     if (config.pin_ch2 != 0)
     {
@@ -798,9 +796,8 @@ void ICACHE_RAM_ATTR ZC_detect()
         if (zc_last != 0)
         {
             zc_interval = currentMicro - zc_last;
-        } else {
-            zc_last = currentMicro;
         }
+        zc_last = currentMicro;
         inTrigger = 0;
     } else if (currentMicro - zc_last >= 3000)  // Max 300 Hz
     {
@@ -899,8 +896,81 @@ void onCfgUpdated()
 
 bool isBoardResMatch(int rHigh, int rLow, float volt)
 {
-    float accurateVoltage = 3.3 / (rHigh + rLow) * rLow;
-    return accurateVoltage * 0.97 <= volt && volt <= accurateVoltage * 1.03;
+    float accurateVoltage = 3.3 / (float)(rHigh + rLow) * rLow;
+    return accurateVoltage * 0.95 <= volt && volt <= accurateVoltage * 1.15;
+}
+
+void onLedCallback(cfg_led_stage_t stage)
+{
+    uint32_t currentMillis = millis();
+    uint32_t currentMicros = micros();
+#ifdef LED0_PIN
+    static uint32_t blink_t = 0;
+    static bool blink_state = false;
+
+    if (stage == INITALIZE || stage == CLIENT_CONNECTED)
+    {
+        if (currentMillis - blink_t >= (stage == INITALIZE ? 100 : 500)) 
+        {
+          blink_t = currentMillis;
+          blink_state = !blink_state;
+          digitalWrite(LED0_PIN, blink_state ? HIGH : LOW);
+        }
+    } else 
+    {
+        uint8_t ledPeriod = (config.led_feature >> 4) == 0 ? 0 : 255;
+        if ((config.led_feature >> 4) & 0x1) // WiFi Status
+        {
+            ledPeriod = WiFi.status() == WL_CONNECTED ? 255 : 0;
+        }
+        if ((config.led_feature >> 4) & 0x2) // Channel Bright
+        {
+            ledPeriod &= (uint8_t)(config.bright / 100. * 255);
+        }
+        if ((config.led_feature >> 4) & 0x4) // Breath Light
+        {
+    //        ledPeriod &= (uint8_t)((abs((int32_t)(millis() % 1000) - 500)) * 255 / 500);
+            ledPeriod = ledPeriod * ((abs((int32_t)(currentMillis % 1000) - 500)) / 500.);
+        }
+        ledcWrite(3, 255 - ledPeriod);
+    }
+#endif
+#ifdef LED1_PIN
+    static bool interruptEnabled = false;
+    if (stage == INITALIZE && config.work_mode >= 2 && !interruptEnabled)
+    {
+        interruptEnabled = true;
+        enableInterrupts();
+    } else if (stage == CLIENT_CONNECTED && interruptEnabled)
+    {
+        interruptEnabled = false;
+        disableInterrupts();
+        error_code = 0;
+    }
+
+    if (stage == INITALIZE && interruptEnabled)
+    {
+        error_code = 0;
+        if (config.work_mode >= 2 && currentMicros > zc_last && currentMicros - zc_last >= 300000) // no edge trigger more then 1000ms
+        {
+            error_code = -1;
+        }
+    }
+    if (identifyMode)
+    {
+        if (currentMillis / 100 % 2 == 0 && currentMillis % 1000 <= 400)
+        {
+            digitalWrite(LED1_PIN, LOW);
+        } else {
+            digitalWrite(LED1_PIN, HIGH);
+        }
+    } else if (error_code == -1 && currentMillis / 100 % 2 == 0)
+    {
+        digitalWrite(LED1_PIN, LOW);
+    } else {
+        digitalWrite(LED1_PIN, HIGH);
+    }
+#endif
 }
 
 void setup() {
@@ -918,19 +988,6 @@ void setup() {
   digitalWrite(DEBUG_TIMER_PIN, LOW);
 #endif
 
-#ifdef LED0_PIN
-  pinMode(LED0_PIN, OUTPUT);
-  digitalWrite(LED0_PIN, HIGH);
-  ledcSetup(3, 1000, 8);
-  ledcWrite(3, 255);
-  ledcAttachPin(LED0_PIN, 3);
-#endif
-#ifdef LED1_PIN
-  pinMode(LED1_PIN, OUTPUT);
-  digitalWrite(LED1_PIN, HIGH);
-#endif
-  
-  pinMode(LED_BUILTIN, OUTPUT);
   WiFi.persistent( false );
   Serial.begin(115200);
   byte mac[6];
@@ -988,27 +1045,39 @@ void setup() {
   if (!cfgCheck)
   {
 #if ARDUINO_ARCH_ESP32
-      float pin35Voltage = 0;
-      float adcVoltageRange = 3.6;
-      analogSetPinAttenuation(35, ADC_11db);
-      if (analogRead(35) <= 1100)
-      {
-          adcVoltageRange = 1.1;
-          analogSetPinAttenuation(35, ADC_0db);
-      } else if (analogRead(35) <= 2200)
-      {
-          adcVoltageRange = 2;
-          analogSetPinAttenuation(35, ADC_6db);
-      }
-      uint16_t pin35_value = analogRead(35);
-      pin35Voltage = adcVoltageRange * pin35_value / 4095.;
-      // >= V1.7.1 PCB Auto Settings
+      pinMode(35, INPUT);
       pinMode(27, INPUT_PULLUP);
       pinMode(34, INPUT_PULLUP);
-      pinMode(35, INPUT_PULLUP);
+      float pin35Voltage = 0;
+      float adcVoltageRange = 3.6;
+      adcVoltageRange = 3.6;
+      adc_set_data_inv(ADC_UNIT_1, true);
+      adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_11);
+      if (adc_filter_value(ADC1_CHANNEL_7, 8) <= 1100)
+      {
+          adcVoltageRange = 1.1;
+          adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_0);
+      } else if (adc_filter_value(ADC1_CHANNEL_7, 8) <= 2200)
+      {
+          adcVoltageRange = 2;
+          adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_6);
+      }
+      uint16_t pin35_value = adc_filter_value(ADC1_CHANNEL_7, 8);
+      // pin35Voltage = adcVoltageRange * pin35_value / 4095.;
+      if (adcVoltageRange <= 1.2)
+      {
+          pin35Voltage = 0.15 + (pin35_value - 250.) / (3750.-250.) * 0.8;
+      } else if (adcVoltageRange <= 2.1)
+      {
+          pin35Voltage = 0.15 + (pin35_value - 90.) / (3850.-90.) * 1.6;
+      } else 
+      {
+          pin35Voltage = 0.15 + (pin35_value - 20.) / (2950.-20.) * 2.3;
+      }
+      // >= V1.7.1 PCB Auto Settings
       delay(100);
       // >= V1.7.1 PCB Auto Settings
-      printLog(LOG_INFO, "AutoConf Resistor Value: %ld (%f V  Range = %f)\n", pin35_value, pin35Voltage, adcVoltageRange);
+      printLog(LOG_INFO, "AutoConf Resistor Value: %ld (%.02f V  Range = %f)\n", pin35_value, pin35Voltage, adcVoltageRange);
 
       if (isBoardResMatch(4700, 10000, pin35Voltage)) // 2400 <= pin35_value && pin35_value <= 2750) // 4.7k/10k with 5%
       {
@@ -1017,6 +1086,7 @@ void setup() {
           config.pin_ch1 = 4;
           config.pin_ch2 = 16;
           config.mode_ch2 = 1;
+          config.ct_abx = 10;
           config.pin_en1 = 0;
           config.pin_en2 = 0;
           config.pin_scr_trig = 5;
@@ -1029,6 +1099,7 @@ void setup() {
           config.pin_ch1 = 5;
           config.pin_ch2 = 15;
           config.mode_ch2 = 1;
+          config.ct_abx = 10;
           config.pin_en1 = 0;
           config.pin_en2 = 0;
           config.pin_scr_trig = 4;
@@ -1042,6 +1113,7 @@ void setup() {
           config.pin_ch1 = 4;
           config.pin_ch2 = 16;
           config.mode_ch2 = 1;
+          config.ct_abx = 10;
           config.pin_en1 = 0;
           config.pin_en2 = 0;
           config.pin_scr_trig = 5;
@@ -1056,6 +1128,7 @@ void setup() {
           config.pin_ch1 = 101;
           config.pin_ch2 = 102;
           config.mode_ch2 = 1;
+          config.ct_abx = 10;
           config.pin_en1 = 0;
           config.pin_en2 = 0;
           config.pin_sensor = 32;
@@ -1133,11 +1206,6 @@ void setup() {
   }
 #endif
 
-  if (config.pin_ch1 != LED_BUILTIN)
-  {
-      digitalWrite(LED_BUILTIN, LOW);
-  }
-  
 //  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
 
   Serial.printf("\n");
@@ -1145,7 +1213,25 @@ void setup() {
   printLog(LOG_INFO, "Version: %s\n", VERSION);
   Serial.printf("Device ID: %s\n", mqtt_cls+sizeof(MQTT_CLASS));
 
+#ifdef LED1_PIN
+  pinMode(LED1_PIN, OUTPUT);
+  digitalWrite(LED1_PIN, HIGH);
+#endif
+
+#ifdef LED0_PIN
+  pinMode(LED0_PIN, OUTPUT);
+  startupWifiConfigure(def_cfg, msg_buf, sizeof(msg_buf), mqtt_cls, onLedCallback);
+#else
   startupWifiConfigure(def_cfg, msg_buf, sizeof(msg_buf), mqtt_cls);
+#endif
+  
+#ifdef LED0_PIN
+  pinMode(LED0_PIN, OUTPUT);
+  digitalWrite(LED0_PIN, HIGH);
+  ledcSetup(3, 1000, 8);
+  ledcWrite(3, 255);
+  ledcAttachPin(LED0_PIN, 3);
+#endif
   
 //  ignoreOutput = true;
   Serial.printf("\n");
@@ -1252,17 +1338,14 @@ void setup() {
       STARTUP_SMOOTH_EXECUTE;
       yield();
   }
+  updatePWMValue(config.bright, config.ct_abx);
   
   ignoreOutput = false;
   last_state_hold = 0;
 
 ////  WiFi.setSleepMode(WIFI_LIGHT_SLEEP, 1000);
   init_mqtt_client(&client, callback, onCfgUpdated);
-  if (LED_BUILTIN != config.pin_ch1 && LED_BUILTIN != config.pin_ch2)
-  {
-      digitalWrite(LED_BUILTIN, HIGH);    
-  }
-
+  
   // if luminous is more than 500 lx degrees below or above setpoint, OUTPUT will be set to min or max respectively
 //  pidControl.setBangBang(15000);
   //set PID update interval to 100ms
@@ -1277,6 +1360,7 @@ void setup() {
 
 void sendMeta()
 {
+    static bool isSendIdentify = false;
     last_send_meta = millis();
   // max length = 64 - 21
     char *p = msg_buf + sprintf(msg_buf, "{\"name\":\"%s\",\"board\":\"%s\"", dev_name, ARDUINO_BOARD);
@@ -1485,6 +1569,11 @@ bool callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   {
       realtime_data = !realtime_data;
       printLog(LOG_INFO, "Toggle Realtime Data: %s\n", realtime_data ? "ON" : "OFF");
+  } else if (strcmp(topic, "toggle_identify") == 0)
+  {
+      identifyMode = !identifyMode;
+      sprintf(msg_buf, "{\"identify\":%d}", identifyMode ? 1 : 0);
+      client.publish("status", msg_buf);
   } else if (strcmp(topic, "reset") == 0)
   {
       if (length > 0 && payload[0] == '1')
@@ -1538,14 +1627,12 @@ void on_mqtt_connected()
     last_state = -1;
 }
 
-int uint16_cmpfunc (const void * a, const void * b) {
-   return ( *(uint16_t*)a - *(uint16_t*)b );
-}
-
 #include <EEPROM.h>
 int buflen = 0;
 void loop() {
     uint32_t currentMillis = millis();
+    uint32_t currentMicros = micros();
+    static int last_error = 0;
     static uint32_t lastSensorDetect = 0;
     hasPacket = false;
     if (ZC)
@@ -1559,6 +1646,19 @@ void loop() {
             last_zc_interval = zc_interval;
         }
     }
+    
+    if (config.work_mode >= 2 && currentMicros > zc_last && currentMicros - zc_last >= 300000) // no edge trigger more then 300ms
+    {
+        if (error_code == 0)
+        {
+            error_code = -1;
+            printLog(LOG_WARNING, "Edge Trigger timeout: %ld  current: %ld\n", currentMicros, zc_last);
+        }
+    } else if (error_code == -1)
+    {
+        error_code = 0;
+    }
+    
     while (Serial.available())
     {
       char ch = Serial.read();
@@ -1741,8 +1841,9 @@ void loop() {
     if (check_connect(mqtt_cls, &client, on_mqtt_connected)) {//确保连上服务器，否则一直等待。
       client.loop();//MUC接收数据的主循环函数。
       long rssi = WiFi.RSSI();
-       if (last_state != config.bright || (abs(rssi - last_rssi) >= 3 && currentMillis - last_send_rssi >= 5000))
+       if (last_error != error_code || last_state != config.bright || (abs(rssi - last_rssi) >= 3 && currentMillis - last_send_rssi >= 5000))
        {
+          last_error = error_code;
           last_send_rssi = currentMillis;
           last_state = config.bright;
           last_rssi = rssi;
@@ -1750,13 +1851,13 @@ void loop() {
           {
               if (config.mode_ch2 == 0)
               {
-                  sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, time(NULL));
+                  sprintf(msg_buf, "{\"bright\":%d,\"ct\":%d,\"rssi\":%ld,\"error\":%d,\"version\":\"%s\",\"boot\":%ld,\"chip_temp\":%.0f}", config.bright, config.ct_abx, rssi, error_code, VERSION, time(NULL), (temprature_sens_read() - 32) / 1.8);
               } else 
               {
-                  sprintf(msg_buf, "{\"bright\":%d,\"bright2\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, config.ct_abx, rssi, VERSION, time(NULL));
+                  sprintf(msg_buf, "{\"bright\":%d,\"bright2\":%d,\"rssi\":%ld,\"error\":%d,\"version\":\"%s\",\"boot\":%ld,\"chip_temp\":%.0f}", config.bright, config.ct_abx, rssi, error_code, VERSION, time(NULL), (temprature_sens_read() - 32) / 1.8);
               }
           } else {
-              sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld}", config.bright, rssi, VERSION, time(NULL));
+              sprintf(msg_buf, "{\"bright\":%d,\"rssi\":%ld,\"version\":\"%s\",\"boot\":%ld,\"error\":%d,\"chip_temp\":%.0f}", config.bright, rssi, VERSION, time(NULL), error_code, (temprature_sens_read() - 32) / 1.8);
           }
           client.publish("status", msg_buf);
        }
@@ -1767,21 +1868,5 @@ void loop() {
           sendMeta();
        }
     }
-#ifdef LED0_PIN
-    uint8_t ledPeriod = (config.led_feature >> 4) == 0 ? 0 : 255;
-    if ((config.led_feature >> 4) & 0x1) // WiFi Status
-    {
-        ledPeriod = WiFi.status() == WL_CONNECTED ? 255 : 0;
-    }
-    if ((config.led_feature >> 4) & 0x2) // Channel Bright
-    {
-        ledPeriod &= (uint8_t)(config.bright / 100. * 255);
-    }
-    if ((config.led_feature >> 4) & 0x4) // Breath Light
-    {
-//        ledPeriod &= (uint8_t)((abs((int32_t)(millis() % 1000) - 500)) * 255 / 500);
-        ledPeriod = ledPeriod * ((abs((int32_t)(millis() % 1000) - 500)) / 500.);
-    }
-    ledcWrite(3, 255 - ledPeriod);
-#endif
+    onLedCallback(SERVER_CONNECTED);
 }

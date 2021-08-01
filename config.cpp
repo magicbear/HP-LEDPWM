@@ -5,8 +5,11 @@
   #include <WiFi.h>
   #include <esp_task_wdt.h>
   #include <rom/rtc.h>
+//  #include <esp_bt_main.h>
+//  #include <esp_bt_device.h>
   #define ESPhttpUpdate httpUpdate
   #include <HTTPUpdate.h>
+  #include <esp_wifi.h>
 #else
   #include <FS.h>
   #include <ESP8266WiFi.h>
@@ -771,7 +774,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
 //    interrupts();
 }
 
-void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_buf_size, char *mqtt_cls)
+void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_buf_size, char *mqtt_cls, led_callback led_cb)
 {
   char *p;
   char chEEP;
@@ -787,34 +790,40 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
 //#ifdef ARDUINO_ARCH_ESP8266
 //      WiFi.softAPConfig(IPAddress(192,168,32,1), IPAddress(192,168,32,1), IPAddress(255, 255, 255, 0)); // Set AP Address
 //#endif
+//      // if you are connected, scan for available WiFi networks and print the number discovered:
+//      Serial.println("** Scan Networks **");
+//      byte numSsid = WiFi.scanNetworks();
+//      if (numSsid != WIFI_SCAN_FAILED)
+//      {
+//          Serial.print("Number of available WiFi networks discovered:");
+//          Serial.println(numSsid);
+//          for (int i = 0; i < numSsid; ++i) {
+//              // Print SSID and RSSI for each network found
+//              Serial.printf("  %d: ", i + 1);
+//              Serial.print(WiFi.SSID(i));
+//              Serial.print(" (");
+//              Serial.print(WiFi.RSSI(i));
+//              Serial.print(")");
+//#if ARDUINO_ARCH_ESP32
+//              Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
+//#endif
+//              delay(10);
+//          }
+//      }
+//      
+      WiFi.disconnect();
+      
       printLog(LOG_INFO, "Startup WiFi Station...\n");
       while(!WiFi.softAP(mqtt_cls)){ delay(10); yield(); }; // Startup AP
       printLog(LOG_INFO, "Startup Telet Server...\n");
- 
+      
+      uint8_t primaryChan = 6;
+      wifi_second_chan_t secondChan = WIFI_SECOND_CHAN_NONE;
+      esp_wifi_set_channel(primaryChan, secondChan);
+
       WiFiServer telnetServer(23);
       WiFiClient telnetClient;
 
-      // if you are connected, scan for available WiFi networks and print the number discovered:
-      Serial.println("** Scan Networks **");
-      byte numSsid = WiFi.scanNetworks();
-      if (numSsid != WIFI_SCAN_FAILED)
-      {
-          Serial.print("Number of available WiFi networks discovered:");
-          Serial.println(numSsid);
-          for (int i = 0; i < numSsid; ++i) {
-              // Print SSID and RSSI for each network found
-              Serial.printf("  %d: ", i + 1);
-              Serial.print(WiFi.SSID(i));
-              Serial.print(" (");
-              Serial.print(WiFi.RSSI(i));
-              Serial.print(")");
-#if ARDUINO_ARCH_ESP32
-              Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
-#endif
-              delay(10);
-          }
-      }
-         
       telnetServer.begin(23);
 ssid_input:
       Serial.print("Please input SSID: ");
@@ -822,9 +831,10 @@ ssid_input:
       chEEP = '\0';
       while (chEEP != '\n')
       {
+          if (led_cb != NULL)
+              led_cb(telnetClient ? CLIENT_CONNECTED : INITALIZE);
           if (!telnetClient && (telnetClient = telnetServer.available()))
           {
-//              delay(100);
               t_start = micros();
               while (micros() - t_start <= 100) yield();
               while (telnetClient.available()) telnetClient.read();
@@ -855,11 +865,15 @@ ssid_input:
               chEEP = Serial.read();
               *p++ = chEEP == '\n' || chEEP == '\r' ? '\0' : chEEP;
           }
+          delay(1);
+          yield();
       }
-      if (strlen(ssid) <= 2 && atoi(ssid) != 0)
-      {
-          strcpy(ssid, WiFi.SSID(atoi(ssid)-1).c_str());
-      }
+//      if (strlen(ssid) <= 2 && atoi(ssid) != 0)
+//      {
+//          strcpy(ssid, WiFi.SSID(atoi(ssid)-1).c_str());
+//      }
+      if (led_cb != NULL)
+          led_cb(CLIENT_CONNECTED);
       if (telnetClient)
       {
           telnetClient.print("Please input Password: ");
@@ -872,6 +886,8 @@ ssid_input:
       chEEP = '\0';
       while (chEEP != '\n')
       {
+          if (led_cb != NULL)
+              led_cb(CLIENT_CONNECTED);
           if (telnetClient || (telnetClient = telnetServer.available()))
           {
               if (telnetClient.connected() && telnetClient.available())
@@ -896,6 +912,8 @@ ssid_input:
               chEEP = Serial.read();
               *p++ = chEEP == '\n' || chEEP == '\r' ? '\0' : chEEP;
           }
+          delay(1);
+          yield();
       }
       if (telnetClient)
       {
@@ -910,6 +928,8 @@ ssid_input:
       bool isPort = false;
       while (chEEP != '\n')
       {
+          if (led_cb != NULL)
+              led_cb(CLIENT_CONNECTED);
           chEEP = 0;
           if (telnetClient || (telnetClient = telnetServer.available()))
           {
@@ -942,6 +962,8 @@ ssid_input:
                   *p++ = chEEP == '\n' || chEEP == '\r' ? '\0' : chEEP;
               }
           }
+          delay(1);
+          yield();
       }
       if (telnetClient)
       {
@@ -955,6 +977,8 @@ ssid_input:
       }
       while (chEEP != 'y')
       {
+          if (led_cb != NULL)
+              led_cb(CLIENT_CONNECTED);
           chEEP = 0;
           if (telnetClient || (telnetClient = telnetServer.available()))
           {
@@ -969,6 +993,11 @@ ssid_input:
           }
           if (chEEP == 'n')
           {
+              if (telnetClient)
+              {
+                telnetClient.print("\nPlease input SSID: ");
+                goto ssid_input;
+              }
               ESP.restart();
           }
       }
@@ -1082,7 +1111,7 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
       {
           disconnectTime = millis();
           WiFi.disconnect();
-          printLog(LOG_INFO, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
+          printLog(LOG_DEBUG, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
       } else if (wifiStatus == WL_CONNECT_FAILED) {
           disconnectTime = millis();
           printLog(LOG_ERROR, "\nWiFi: WL_CONNECT_FAILED, disable wifi");
@@ -1098,9 +1127,9 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
       } else if (wifiStatus == WL_DISCONNECTED || wifiStatus == WL_NO_SSID_AVAIL) {
           disconnectTime = millis();
           WiFi.reconnect();
-          printLog(LOG_INFO, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
+          printLog(LOG_DEBUG, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
       }else if (wifiStatus != WL_CONNECTED) {
-          printLog(LOG_INFO, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
+          printLog(LOG_DEBUG, "\nWiFi: %s, Connecting", szWlStatusToStr(wifiStatus));
       } else 
       {
           disconnectTime = 0;
@@ -1186,6 +1215,10 @@ void cfg_initalize_info(size_t size_conf)
 //  }
   printLog(LOG_INFO, "Reset Reason: %d / %d\n", rtc_get_reset_reason(0), rtc_get_reset_reason(1));
 //  Serial.printf("RTC Reset Reason: %d\n", rtc_get_reset_reason());
+//  esp_bluedroid_init();
+//  esp_bluedroid_enable();
+//  const uint8_t *BT_macAddress = esp_bt_dev_get_address();
+//  Serial.printf("BLE Address: %02x:%02x:%02x:%02x:%02x:%02x", BT_macAddress);
   Serial.printf("CPU Speed: %d MHz  XTAL: %d MHz  APB: %d Hz\n", getCpuFrequencyMhz(), getXtalFrequencyMhz(), getApbFrequency());
 #endif
     printLog(LOG_INFO, "Build Date: %s %s  Board: %s  CFG FROM %s SIZE: %d\n", __DATE__, __TIME__, ARDUINO_BOARD, cfg_get_backend(), size_conf);
@@ -1303,4 +1336,84 @@ void printLog(int debugLevel, char *fmt, ...)
 #else
     free(buffer);
 #endif
+}
+
+int uint16_cmpfunc (const void * a, const void * b) {
+   return ( *(uint16_t*)a - *(uint16_t*)b );
+}
+
+int uint32_rcmpfunc (const void * a, const void * b) {
+   return ( *(uint32_t*)b - *(uint32_t*)a );
+}
+
+#ifdef ARDUINO_ARCH_ESP32
+uint16_t adc_filter_value(adc1_channel_t ch, uint8_t samples)
+{
+    uint32_t sensor_adc = 0;
+    uint16_t *sensor_adcValues = (uint16_t *)calloc(sizeof(uint16_t), samples);
+    for (int i = 0; i < samples; i++)
+    {
+        sensor_adcValues[i] = adc1_get_raw(ch);
+    }
+    if (samples >= 2)
+        qsort(sensor_adcValues, samples, sizeof(uint16_t), uint16_cmpfunc);
+    if (samples >= 16)
+    {
+        for (int i = samples / 2 - 8; i < samples / 2 + 8; i++)
+        {
+            sensor_adc += sensor_adcValues[i];
+        }
+        sensor_adc >>= 4;
+        free(sensor_adcValues);
+        return sensor_adc;
+    } else if (samples >= 4) {
+        for (int i = samples / 2 - 2; i < samples / 2 + 2; i++)
+        {
+            sensor_adc += sensor_adcValues[i];
+        }
+        sensor_adc >>= 2;
+        free(sensor_adcValues);
+        return sensor_adc;
+    } else if (samples >= 2) {
+        for (int i = samples / 2 - 1; i < samples / 2 + 1; i++)
+        {
+            sensor_adc += sensor_adcValues[i];
+        }
+        sensor_adc >>= 1;
+        free(sensor_adcValues);
+        return sensor_adc;
+    }
+    uint16_t final_adcValues = sensor_adcValues[0];
+    free(sensor_adcValues);
+    return final_adcValues;
+}
+
+uint32_t filter_uint32_array(uint32_t *a, int samples)
+{
+    uint32_t sensor_adc = 0;
+    if (samples >= 4)
+        qsort(a, samples, sizeof(uint32_t), uint32_rcmpfunc);
+    if (samples >= 16)
+    {
+        for (int i = samples / 2 - 8; i < samples / 2 + 8; i++)
+        {
+            sensor_adc += a[i];
+        }
+        sensor_adc >>= 4;
+    } else if (samples >= 4) {
+        for (int i = samples / 2 - 2; i < samples / 2 + 2; i++)
+        {
+            sensor_adc += a[i];
+        }
+        sensor_adc >>= 2;
+    } else if (samples >= 2) {
+        sensor_adc >>= 1;
+    }
+    return sensor_adc;
+}
+#endif
+
+float mapfloat(float x, long in_min, long in_max, long out_min, long out_max)
+{
+ return (float)(x - in_min) * (out_max - out_min) / (float)(in_max - in_min) + out_min;
 }

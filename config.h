@@ -10,6 +10,9 @@
 //#define MIGRATE_ENABLED
 //#define CFG_DEBUG
 
+#ifdef ARDUINO_ARCH_ESP32
+#include <driver/adc.h>
+#endif
 #include <PubSubClient.h>
 #include <stdarg.h>
 
@@ -19,7 +22,14 @@
 #define   LOG_INFO   2
 #define   LOG_DEBUG   1
 
+enum cfg_led_stage_t {
+  INITALIZE,
+  CLIENT_CONNECTED,
+  SERVER_CONNECTED
+};
+
 typedef bool (*mqtt_callback)(char* topic, byte* payload, unsigned int length);
+typedef void (*led_callback)(cfg_led_stage_t stage);
 typedef void (*cfg_callback)();
 
 extern char *dev_name;
@@ -199,7 +209,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString = false, bool forceSa
  * @param[in]  mqtt_cls    class name for configs (use to check the conf).
  *
  */
-void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_buf_size,  char *mqtt_cls);
+void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_buf_size,  char *mqtt_cls, led_callback led_cb = NULL);
 
 //uint8_t cfg_read_uint8(const hp_cfg_t *def_value, int index);
 //uint16_t cfg_read_uint16(const hp_cfg_t *def_value, int index);
@@ -222,5 +232,26 @@ void printLog(int debugLevel, char *fmt, ...);
 #define CFG_READ_UINT32(addr)  cfg_read_uint32(def_cfg, addr)
 #define CFG_READ_STRING(addr, buf, bufsize)  cfg_read_string(def_cfg, addr, buf, bufsize)
 #define CFG_WRITE_STRING(addr, buf, bufsize)  cfg_write_string(def_cfg, addr, buf, bufsize)
+
+
+#ifdef ARDUINO_ARCH_ESP32
+ #ifdef __cplusplus
+  extern "C" {
+ #endif
+
+  uint8_t temprature_sens_read();
+
+#ifdef __cplusplus
+}
+#endif
+
+uint8_t temprature_sens_read();
+uint32_t filter_uint32_array(uint32_t *a, int samples);
+uint16_t adc_filter_value(adc1_channel_t ch, uint8_t samples = 64);
+#endif
+
+int uint16_cmpfunc (const void * a, const void * b);
+int uint32_rcmpfunc (const void * a, const void * b);
+float mapfloat(float x, long in_min, long in_max, long out_min, long out_max);
 
 #endif
