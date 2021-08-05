@@ -23,6 +23,9 @@ static mqtt_callback on_message = NULL;
 static cfg_callback  on_cfgUpdate = NULL;
 static char *global_msg_buf = NULL;
 static PubSubClient *global_client;
+static uint32_t max_log_buffer = 0;
+bool extFsLogExists = false;
+WiFiUDP udp;
 
 char *dev_name;
 char *ssid;
@@ -966,7 +969,7 @@ ssid_input:
                 telnetClient.print("\nPlease input SSID: ");
                 goto ssid_input;
               }
-              ESP.restart();
+              rebootSystem();
           }
       }
       Serial.printf("\n");
@@ -983,6 +986,7 @@ ssid_input:
   WiFi.setHostname(mqtt_cls);
 #endif
   WiFi.begin(ssid, password);
+  udp.beginMulticast(IPAddress(224, 0, 0, 52), 12345);
   WiFi.setAutoReconnect(true);
 }
 
@@ -1040,6 +1044,50 @@ const char* szWlStatusToStr(wl_status_t wlStatus)
 void sendBufferedLog(PubSubClient *client)
 {
 #ifdef ARDUINO_ARCH_ESP32
+    if (client->connected() && extFsLogExists)
+    {
+        char buf[128];
+        int len;
+        int fsize;
+        bool sendFSLogFailed = false;
+        File f = SPIFFS.open("/logbuf.bin", "r");
+        fsize = f.size();
+        while (f.position() < f.size())
+        {
+            if (!client->connected())
+            {
+                printLog(LOG_ERROR, "LOG: send extfs archived log failed");
+                File fcopy = SPIFFS.open("/logbuf.bin.bak", "w");
+                while (f.position() < f.size())
+                {
+                    len = f.read((uint8_t *)buf, sizeof(buf));
+                    fcopy.write((uint8_t *)buf, len);
+                    if (len != sizeof(buf)) break;
+                }
+                fcopy.close();
+                f.close();
+                SPIFFS.remove("/logbuf.bin");
+                SPIFFS.rename("/logbuf.bin.bak", "/logbuf.bin");
+                sendFSLogFailed = true;
+                break;
+            }
+            if (sizeof(int) != f.read((uint8_t *)&len, sizeof(int))) break;
+            if (len > sizeof(buf)) f.seek(len, SeekCur);
+            else{
+                int rc = f.read((uint8_t *)buf, len);
+                buf[len] = 0;
+                client->publish("log", buf);
+            }
+            
+        }
+        if (!sendFSLogFailed)
+        {
+            f.close();
+            SPIFFS.remove("/logbuf.bin");
+            extFsLogExists = false;
+        }
+            
+    }
     log_chain_t *p = log_chain;
     while (p != NULL)
     {
@@ -1069,9 +1117,13 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
   static uint32_t disconnectTime = 0;
   static wl_status_t lastWiFiStatus = WL_NO_SHIELD;
   static int retry_failed_count = 0;
+  static uint32_t last_try_connect_mqtt = 0;
   static uint32_t lastWiFiDebugMessage = 0;
   wl_status_t wifiStatus = WiFi.status();
 
+#if defined(ARDUINO_ARCH_ESP32) && defined(CFG_ENABLE_GLOBAL_WDT)
+  esp_task_wdt_reset();
+#endif
   // Disconnected -> CONNECT_FAILED -> WL_NO_SHIELD -> WL_DISCONNECTED
   if (wifiStatus != lastWiFiStatus && wifiStatus != WL_IDLE_STATUS)
   {
@@ -1085,7 +1137,7 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
           printLog(LOG_ERROR, "\nWiFi: WL_CONNECT_FAILED, disable wifi");
           if(!WiFi.enableSTA(false)) {
               printLog(LOG_FATAL, "WiFi: STA disable failed! Force reset system!!\n");
-              ESP.restart();
+              rebootSystem();
               return false;
           }
       } else if (wifiStatus == WL_NO_SHIELD)
@@ -1114,7 +1166,7 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
       Serial.printf("\nWiFi: %s, reset wifi", szWlStatusToStr(wifiStatus));
       if(!WiFi.enableSTA(true)) {
           printLog(LOG_FATAL, "WiFi: STA enable failed! Force reset system!!\n");
-          ESP.restart();
+          rebootSystem();
           return false;
       }
   }
@@ -1125,21 +1177,22 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
   }
   if (wifiStatus != WL_CONNECTED && millis() - disconnectTime >= 30000) {
       printLog(LOG_FATAL, "\nWiFi: Status = %d (Disconnected), RESET SYSTEM\n", wifiStatus);
-      ESP.restart();
+      rebootSystem();
   }
-  if (wifiStatus == WL_CONNECTED && !client->connected()){
+  if (wifiStatus == WL_CONNECTED && !client->connected() && millis() - last_try_connect_mqtt >= 3000){
       printLog(LOG_INFO, "MQTT: Connecting to %s:%d, state: %d\n", mqtt_server, port, client->state());
-#ifdef ARDUINO_ARCH_ESP32
+#if defined(ARDUINO_ARCH_ESP32) && !defined(CFG_ENABLE_GLOBAL_WDT)
       esp_task_wdt_init(30, true);
       esp_task_wdt_add(NULL);
 #endif
       if (client->connect(mqtt_cls)) {//接入时的用户名，尽量取一个很不常用的用户名
         retry_failed_count = 0;
         printLog(LOG_INFO, "MQTT: Connected, login by: %s\n",mqtt_cls);
-  #ifdef ARDUINO_ARCH_ESP32
+  #if defined(ARDUINO_ARCH_ESP32) && !defined(CFG_ENABLE_GLOBAL_WDT)
         esp_task_wdt_delete(NULL);
         esp_task_wdt_deinit();
   #endif
+        last_try_connect_mqtt = 0;
         if (onConnect != NULL) onConnect();
       } else {
   #ifdef ARDUINO_ARCH_ESP32
@@ -1148,17 +1201,73 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
         retry_failed_count++;
         printLog(LOG_ERROR, "MQTT: Connect failed, rc=%d\n", client->state());//连接失败
         client->disconnect();
-        delay(1000);
-        if (retry_failed_count >= 10)
-        {
-            printLog(LOG_FATAL, "MQTT: Reconnect Too many times, RESET SYSTEM\n");
-            ESP.restart();
-        }
+        last_try_connect_mqtt = millis();
+//        delay(1000);
+//        if (retry_failed_count >= 10)
+//        {
+//            printLog(LOG_FATAL, "MQTT: Reconnect Too many times, RESET SYSTEM\n");
+//            rebootSystem();
+//        }
       }
   }
   if (client->connected())
   {
       sendBufferedLog(client);
+  }
+  uint16_t udpPktSize;
+  if (wifiStatus == WL_CONNECTED && (udpPktSize = udp.parsePacket()))
+  {
+      if (udpPktSize <= 512)
+      {
+          char rcvBuf[64];
+          char *udpBuf = (char *)malloc(udpPktSize+1);
+          if (udpBuf == NULL)
+          {
+              printLog(LOG_FATAL, "UDP: Buffer overflow\n");
+              uint16_t bufLen = 0;
+              while (udpPktSize > 0)
+              {
+                  udpPktSize -= udp.read(rcvBuf, udpPktSize > sizeof(rcvBuf) ? sizeof(rcvBuf) : udpPktSize);
+              }
+          } else 
+          {
+              udp.read(udpBuf, udpPktSize);
+              
+              if (udpPktSize >= 19 && strncmp(udpBuf, "{\"cmd\":\"discovery\"}", 19) == 0)
+              {
+                  printLog(LOG_INFO, "UDP: receive discovery command\n");
+                  sprintf(rcvBuf, "{\"dev\":\"%s\"}", mqtt_cls);
+                  if (udp.beginMulticastPacket()) //udp.remoteIP(), udp.remotePort()))
+                  {
+                      udp.write((uint8_t *)rcvBuf, strlen(rcvBuf));
+                      printLog(LOG_INFO, "UDP: send discovery result: %s\n", rcvBuf);
+                      udp.endPacket();
+                  }
+              } else if (udpPktSize >= 22 + strlen(mqtt_cls) + 2 && strncmp(udpBuf, "{\"cmd\":\"reset\",\"dev\":\"", 22) == 0
+                && strncmp(udpBuf + 22, mqtt_cls, strlen(mqtt_cls)) == 0
+                && strncmp(udpBuf + 22 + strlen(mqtt_cls), "\"}", 2) == 0 )
+              {
+                  printLog(LOG_INFO, "UDP: receive reset command\n");
+                  if (client->connected())
+                  {
+                      sendBufferedLog(client);
+                  }
+                  if (cfg_backend == STORAGE_NVS)
+                  {
+                      int rc = nvs_open("nvs", NVS_READWRITE, &nvs);
+                      if (rc != ESP_OK) {
+                          printLog(LOG_ERROR, "Fatal to open NVS\n");
+                          return false;
+                      }
+                      nvs_erase_key(nvs, "class");
+                      nvs_commit(nvs);
+                      nvs_close(nvs);
+                      rebootSystem();
+                  }
+              }
+              free(udpBuf);
+          }
+      }
   }
   return wifiStatus == WL_CONNECTED && client->connected();
 }
@@ -1172,17 +1281,31 @@ void cfg_initalize_info(size_t size_conf)
   Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
   printLog(LOG_INFO, "Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
 #elif ARDUINO_ARCH_ESP32
-//  if (log_chain_magic != 0x22336543 ||
-//      (rtc_get_reset_reason(0) == 12 && rtc_get_reset_reason(1) == 12) ||
-//      ((rtc_get_reset_reason(0) == 1 || rtc_get_reset_reason(0) == 12) && rtc_get_reset_reason(1) == 14))
-//  {
-//      log_chain = NULL;
-//      log_chain_tail = NULL;
-//      log_chain_buffer = 0;
-//      log_chain_magic = 0x22336543;
-//  }
+  esp_task_wdt_init(10, true);
+  esp_task_wdt_add(NULL);
+  
+  extFsLogExists = false;
+  if (SPIFFS.begin(true))
+  {
+      Serial.printf("SPIFFS exists: used: %ld / total: %ld\n", SPIFFS.usedBytes(), SPIFFS.totalBytes());
+      if (SPIFFS.totalBytes() / 2 > SPIFFS.usedBytes())
+      {
+          max_log_buffer = SPIFFS.totalBytes() / 2 - SPIFFS.usedBytes();
+          extFsLogExists = SPIFFS.exists("/logbuf.bin");
+      }
+  } else 
+  {
+      Serial.printf("Initalize SPIFFFS failed\n");
+  }
   printLog(LOG_INFO, "Reset Reason: %d / %d\n", rtc_get_reset_reason(0), rtc_get_reset_reason(1));
-//  Serial.printf("RTC Reset Reason: %d\n", rtc_get_reset_reason());
+
+  esp_task_wdt_delete(NULL);
+  esp_task_wdt_deinit();
+  
+#if defined(CFG_ENABLE_GLOBAL_WDT)
+  esp_task_wdt_init(30, true);
+  esp_task_wdt_add(NULL);
+#endif
 //  esp_bluedroid_init();
 //  esp_bluedroid_enable();
 //  const uint8_t *BT_macAddress = esp_bt_dev_get_address();
@@ -1194,6 +1317,39 @@ void cfg_initalize_info(size_t size_conf)
 }
 
 
+void rebootSystem()
+{
+    if (max_log_buffer > 0)
+    {   
+        log_chain_t *p = log_chain;
+        if (p != NULL)
+        {
+            File LogBufferFile = SPIFFS.open("/logbuf.bin", "a+");
+            while (p != NULL)
+            {
+                if (max_log_buffer < p->len + 1)
+                {
+                    break;
+                }
+                LogBufferFile.write((const uint8_t *)&p->len, sizeof(int));
+                LogBufferFile.write((const uint8_t *)p->data, p->len);
+                max_log_buffer -= p->len + 1;
+                
+                p = p->next;
+            }
+            LogBufferFile.close();
+            Serial.printf("Savedd logs to ExtFS\n");
+        }
+    }
+    ESP.restart();
+//#ifdef ARDUINO_ARCH_ESP32
+//
+//#else
+//    ESP.reset();
+//#endif
+}
+
+
 void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用于接收数据
   int l=0;
   int p=1;
@@ -1202,6 +1358,11 @@ void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用�
   {
     WiFiClient ota_client;
 
+#if defined(ARDUINO_ARCH_ESP32) && defined(CFG_ENABLE_GLOBAL_WDT)
+    esp_task_wdt_delete(NULL);
+    esp_task_wdt_deinit();
+#endif
+    
     char bufferByte = payload[length];
     payload[length] = 0;
     printLog(LOG_INFO, "Start OTA from URL: %s\n", (char *)payload);
@@ -1214,23 +1375,27 @@ void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用�
         sprintf(global_msg_buf, "{\"ota\":\"%s\"}", ESPhttpUpdate.getLastErrorString().c_str());
         global_client->publish("status", global_msg_buf);
         printLog(LOG_FATAL, "HTTP_UPDATE_FAILD Error (%d): %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
-        ESP.restart();
+        rebootSystem();
         break;
 
       case HTTP_UPDATE_NO_UPDATES:
         sprintf(global_msg_buf, "{\"ota\":\"no updates\"}");
         global_client->publish("status", global_msg_buf);
         printLog(LOG_ERROR, "HTTP_UPDATE_NO_UPDATES");
-        ESP.restart();
+        rebootSystem();
         break;
 
       case HTTP_UPDATE_OK:
         sprintf(global_msg_buf, "{\"ota\":\"success\"}");
         global_client->publish("status", global_msg_buf);
         printLog(LOG_INFO, "HTTP_UPDATE_OK");
-        ESP.restart();
+        rebootSystem();
         break;
     }
+#if defined(ARDUINO_ARCH_ESP32) && defined(CFG_ENABLE_GLOBAL_WDT)
+    esp_task_wdt_init(30, true);
+    esp_task_wdt_add(NULL);
+#endif
   } else if (strcmp(topic, "setName") == 0)
   {
       if (length < 32)
@@ -1246,7 +1411,7 @@ void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用�
   } else if (strcmp(topic, "reboot") == 0)
   {
       printLog(LOG_INFO, "Remote reboot request\n");
-      ESP.restart();
+      rebootSystem();
   }
 }
 
@@ -1273,6 +1438,8 @@ void printLog(int debugLevel, char *fmt, ...)
     vsprintf( p, fmt, arglist );
     Serial.printf("%s", p);
     va_end ( arglist );                  // Cleans up the list
+
+    needed += p - buffer;
     
 #ifdef ARDUINO_ARCH_ESP32
     if (log_chain_buffer + needed <= 4096)   // Max 4K Log Buffer

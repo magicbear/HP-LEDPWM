@@ -63,7 +63,7 @@ volatile scr_timing_t executeTiming, pendingTiming;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "2.71"
+#define VERSION "2.75"
 
 #ifdef ARDUINO_ARCH_ESP8266
   #define PWM_CHANNELS 2
@@ -141,6 +141,7 @@ typedef __attribute__((__packed__)) struct {
     float    adc_b;
     uint8_t  scr_driver;
     uint8_t  led_feature; // HHHH (LED0) LLLL(LED1)
+    uint8_t  allow_reset;
     uint16_t pid_interval;
 } conf_t;
 //  __attribute__ ((aligned (2)))
@@ -195,6 +196,7 @@ const hp_cfg_t def_cfg[] = {
     AUTO_CONF(scr_prerelease, -50, false),
     AUTO_CONF(pin_sensor, 0, false),
     AUTO_CONF(max_lm, 0, false),
+    AUTO_CONF(allow_reset, 0, false),
     AUTO_CONF(pid_interval, 100, false),
     AUTO_CONF(KP, 100, false),
     AUTO_CONF(KI, 1500, false),
@@ -439,15 +441,6 @@ void pwmWrite(uint8_t pwm_pin, int32_t duty)
 #endif
 }
 
-void rebootSystem()
-{
-    ESP.restart();
-//#ifdef ARDUINO_ARCH_ESP32
-//
-//#else
-//    ESP.reset();
-//#endif
-}
 
 void updatePWMValue(float set_state, float ct_abx)
 {
@@ -1219,13 +1212,13 @@ void setup() {
           {
               printLog(LOG_INFO, "Reset config command from serial.\n");
               cfg_reset(def_cfg);
-              ESP.restart();
+              rebootSystem();
           }
       }
     }
     if (millis() >= 60000)
     {
-        ESP.restart();
+        rebootSystem();
     }
     if (!bootCountReset && millis() - boot_time >= 5000)
     {
@@ -1265,7 +1258,7 @@ void setup() {
           rebootSystem();
       }
   } else {
-      if (boot_count > 5)
+      if (config.allow_reset && boot_count > 5)
       {
           boot_count_reset();
           printLog(LOG_INFO, "Reset config by Reboot 5 times\n");
@@ -1319,7 +1312,7 @@ void sendMeta()
     }
 //    if (config.pin_sensor != 0)
     {
-        p = msg_buf + sprintf(msg_buf, "{\"sensor_pin\":%d,\"max_lm\":%d,\"kp\":%ld,\"ki\":%ld,\"kd\":%ld,\"pid_interval\":%d}", config.pin_sensor, config.max_lm, config.KP, config.KI, config.KD, config.pid_interval);
+        p = msg_buf + sprintf(msg_buf, "{\"sensor_pin\":%d,\"max_lm\":%d,\"kp\":%ld,\"ki\":%ld,\"kd\":%ld,\"pid_interval\":%d,\"allow_reset\":%d}", config.pin_sensor, config.max_lm, config.KP, config.KI, config.KD, config.pid_interval, config.allow_reset);
         
         client.publish("dev", msg_buf);
         
@@ -1551,6 +1544,7 @@ bool callback(char* topic, byte* payload, unsigned int length) {//用于接收�
   AUTO_CONF_INT_COMMAND(topic, "set_ki", KI, pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV); pidControl.reset())
   AUTO_CONF_INT_COMMAND(topic, "set_kd", KD, pidControl.setGains(config.KP / KP_DIV, config.KI / KI_DIV, config.KD / KD_DIV); pidControl.reset())
   AUTO_CONF_INT_COMMAND(topic, "set_pid_interval", pid_interval, pidControl.setTimeStep(config.pid_interval); pidControl.reset())
+  AUTO_CONF_INT_COMMAND(topic, "set_allow_reset", allow_reset, )
   AUTO_CONF_INT_COMMAND(topic, "set_sensor_ref", sensor_ref, )
   AUTO_CONF_INT_COMMAND(topic, "set_sensor_ref_r1", sensor_ref_r1, )
   AUTO_CONF_INT_COMMAND(topic, "set_adc_0db", adc_volt_0db, )
@@ -1592,7 +1586,7 @@ void loop() {
             last_zc_interval = zc_interval;
         }
     }
-    
+
     if (config.work_mode >= 2 && currentMicros > zc_last && currentMicros - zc_last >= 300000) // no edge trigger more then 300ms
     {
         if (error_code == 0)
@@ -1608,19 +1602,9 @@ void loop() {
     while (Serial.available())
     {
       char ch = Serial.read();
-//      if (ch == 'S')
-//      {
-//          Serial.printf("Set pin %d to OUTPUT\n", config.pin_ch1);
-//          pinMode(config.pin_ch1, OUTPUT);
-//          digitalWrite(config.pin_ch1, HIGH);
-//      } else if (ch == 'O') {
-//          Serial.printf("Set pin %d to OUTPUT OPEN\n", config.pin_ch1);
-//          pinMode(config.pin_ch1, OUTPUT);
-//          digitalWrite(config.pin_ch1, LOW);
-//      } else 
       if (ch == 'R' && Serial.read() == 'r') {
           cfg_reset(def_cfg);
-          ESP.restart();
+          rebootSystem();
       }
     }
     if (!bootCountReset && currentMillis - boot_time >= 5000)

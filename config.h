@@ -9,6 +9,8 @@
 #endif
 //#define CFG_DEBUG
 
+#define CFG_ENABLE_GLOBAL_WDT
+
 #ifdef ARDUINO_ARCH_ESP32
 #include <driver/adc.h>
 #endif
@@ -252,5 +254,6 @@ uint16_t adc_filter_value(adc1_channel_t ch, uint8_t samples = 64);
 int uint16_cmpfunc (const void * a, const void * b);
 int uint32_rcmpfunc (const void * a, const void * b);
 float mapfloat(float x, long in_min, long in_max, long out_min, long out_max);
+void rebootSystem();
 
 #endif
