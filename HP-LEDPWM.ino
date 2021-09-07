@@ -5,9 +5,9 @@
   #include <driver/dac.h>
   #include <driver/ledc.h>
   #include <rom/rtc.h>
-  #include <esp_task_wdt.h>
   #include <esp32-hal-timer.c>
   #include <esp32-hal-adc.h>
+  #include <HTTPUpdate.h>
 #elif ARDUINO_ARCH_ESP8266
   #include <ESP8266WiFi.h>
   extern "C"{
@@ -63,7 +63,7 @@ volatile scr_timing_t executeTiming, pendingTiming;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "2.75"
+#define VERSION "2.83"
 
 #ifdef ARDUINO_ARCH_ESP8266
   #define PWM_CHANNELS 2
@@ -1325,11 +1325,18 @@ void sendMeta()
 }
 
 
-bool callback(char* topic, byte* payload, unsigned int length) {//用于接收数据
+bool callback(const char* topic, byte* payload, unsigned int length) {//用于接收数据
   int l=0;
   int p=1;
   hasPacket = true;
-  if (strcmp(topic, "set_bright") == 0 || strcmp(topic, "set_ct_abx") == 0)
+  if (strcmp(topic, "ota") == 0)
+  {
+#if defined(LED1_PIN) && defined(ARDUINO_ARCH_ESP32)
+      httpUpdate.setLedPin(LED1_PIN, LOW);
+#endif
+      disableInterrupts();  // Must be stop all interrupts
+      return false;         // To process parent on_message
+  }else if (strcmp(topic, "set_bright") == 0 || strcmp(topic, "set_ct_abx") == 0)
   {
     if (!inSmooth)
     {
@@ -1578,7 +1585,7 @@ void loop() {
     if (ZC)
     {
         ZC = 0;
-        if (abs(zc_interval - last_zc_interval) >= 1000)
+        if (abs((int32_t)zc_interval - (int32_t)last_zc_interval) >= 1000)
         {
 #if DEBUG_LEVEL >= 3
             Serial.printf("Zero Detect Interval: %d\n", zc_interval);
@@ -1770,9 +1777,9 @@ void loop() {
 #endif
     if (check_connect(mqtt_cls, &client, on_mqtt_connected)) {//确保连上服务器，否则一直等待。
       client.loop();//MUC接收数据的主循环函数。
-      long rssi = WiFi.RSSI();
-       if (last_error != error_code || last_state != config.bright || (abs(rssi - last_rssi) >= 3 && currentMillis - last_send_rssi >= 5000))
+       if (last_error != error_code || last_state != config.bright || currentMillis - last_send_rssi >= 60000)
        {
+          long rssi = WiFi.RSSI();  // This function will broken connect make packet dropped.
           last_error = error_code;
           last_send_rssi = currentMillis;
           last_state = config.bright;
@@ -1794,8 +1801,7 @@ void loop() {
        if (currentMillis - last_send_meta >= 60000)
        {
           if (!isScrMode)
-              Serial.printf("PING %ld  WiFI: %d\n", currentMillis, WiFi.status());
-          sendMeta();
+              Serial.printf("PING %ld  WiFI: %d RSSI: %d\n", currentMillis, WiFi.status(), WiFi.RSSI());
        }
     }
     onLedCallback(SERVER_CONNECTED);

@@ -29,7 +29,7 @@ enum cfg_led_stage_t {
   SERVER_CONNECTED
 };
 
-typedef bool (*mqtt_callback)(char* topic, byte* payload, unsigned int length);
+typedef bool (*mqtt_callback)(const char* topic, byte* payload, unsigned int length);
 typedef void (*led_callback)(cfg_led_stage_t stage);
 typedef void (*cfg_callback)();
 
@@ -56,7 +56,7 @@ static uint32_t     log_chain_magic = 0x22336543;
 
 enum cfg_storage_backend_t {
     STORAGE_NVS,
-    STORAGE_SPIFFS,
+    STORAGE_FS,
     STORAGE_EEPROM
 };
 
@@ -64,6 +64,7 @@ typedef struct hp_cfg {
     int offset;  /*!< offset for config buffer */
     int size;    /*!< offset for config variable size (1: uint8, 2:uint16, 4: uint32/float, 0: string, other: blob) */
     union {
+      int32_t  int32;
       uint32_t uint32;
       uint16_t uint16;
       uint8_t  uint8;
@@ -222,7 +223,8 @@ void boot_count_reset();
 void cfg_initalize_info(size_t size_conf);
 bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void));
 void init_mqtt_client(PubSubClient *client, mqtt_callback callback, cfg_callback OnCfgUpdate);
-void printLog(int debugLevel, char *fmt, ...);
+void printLog(int debugLevel, const char *fmt, ...);
+int esp_system_log(const char *fmt, va_list arg);
 
 #define CFG_CHECK() cfg_check(mqtt_cls, def_cfg)
 #define CFG_INIT(FULL_INIT) cfg_init(mqtt_cls, def_cfg, FULL_INIT)

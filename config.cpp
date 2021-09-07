@@ -1,7 +1,16 @@
 #include <EEPROM.h>
+#define USE_LITTLE_FS
+#ifdef USE_LITTLE_FS
+#include <LITTLEFS.h>
+#else
+  #ifdef ARDUINO_ARCH_ESP32
+    #include <SPIFFS.h>
+  #else
+    #include <FS.h>
+  #endif
+#endif
 #ifdef ARDUINO_ARCH_ESP32
   #include <nvs.h>
-  #include <SPIFFS.h>
   #include <WiFi.h>
   #include <esp_task_wdt.h>
   #include <rom/rtc.h>
@@ -11,11 +20,16 @@
   #include <HTTPUpdate.h>
   #include <esp_wifi.h>
 #else
-  #include <FS.h>
   #include <ESP8266WiFi.h>
   #include <ESP8266httpUpdate.h>
 #endif
 #include "config.h"
+
+// ESP-Toolset Define 
+// 1.0.6
+// F_CPU  ARDUINO  ARDUINO_ESP32_DEV  ARDUINO_ARCH_ESP32  ARDUINO_BOARD  ARDUINO_VARIANT  ESP32  CORE_DEBUG_LEVEL IDF_VER WITH_POSIX _GNU_SOURCE
+// 2.0.0
+// ARDUINO_EVENT_RUNNING_CORE ARDUINO_RUNNING_CORE ARDUINO_USB_CDC_ON_BOOT
 
 static char *cfg_buffer = NULL;
 static enum cfg_storage_backend_t cfg_backend;
@@ -26,12 +40,17 @@ static PubSubClient *global_client;
 static uint32_t max_log_buffer = 0;
 bool extFsLogExists = false;
 WiFiUDP udp;
+bool fallbackEnabled = false;
+WiFiServer telnetServer(23);
+WiFiClient telnetClient;
 
 char *dev_name;
 char *ssid;
 char *password;
 char *mqtt_server;//服务器的地址
 uint16_t port;//服务器端口号 
+const hp_cfg_t *last_def_cfg = NULL;
+led_callback last_led_cb = NULL;
 
 #define BUFFER_SIZE 255
 
@@ -66,22 +85,22 @@ void cfg_begin()
             free(szClass);
         }
         nvs_close(nvs);
-    } else if ((rc == ESP_ERR_NVS_PART_NOT_FOUND || rc == ESP_ERR_NVS_NOT_INITIALIZED) && SPIFFS.begin(true))
-    {
-        cfg_backend = STORAGE_SPIFFS;
-        cfg_buffer = (char *)calloc(BUFFER_SIZE, 1);
-        if (SPIFFS.exists("/config.bin"))
-        {
-            File f = SPIFFS.open("/config.bin", "r");
-            if (f.read((uint8_t *)cfg_buffer, BUFFER_SIZE) != BUFFER_SIZE)
-            {
-                cfg_buffer[0] = '\0';
-                f.close();
-                SPIFFS.remove("/config.bin");
-                return cfg_begin();
-            }
-            f.close();
-        }
+//    } else if ((rc == ESP_ERR_NVS_PART_NOT_FOUND || rc == ESP_ERR_NVS_NOT_INITIALIZED) && SPIFFS.begin(true))
+//    {
+//        cfg_backend = STORAGE_FS;
+//        cfg_buffer = (char *)calloc(BUFFER_SIZE, 1);
+//        if (SPIFFS.exists("/config.bin"))
+//        {
+//            File f = SPIFFS.open("/config.bin", "r");
+//            if (f.read((uint8_t *)cfg_buffer, BUFFER_SIZE) != BUFFER_SIZE)
+//            {
+//                cfg_buffer[0] = '\0';
+//                f.close();
+//                SPIFFS.remove("/config.bin");
+//                return cfg_begin();
+//            }
+//            f.close();
+//        }
     } else 
     {
         cfg_backend = STORAGE_EEPROM;
@@ -96,7 +115,7 @@ void cfg_begin()
         cfg_backend = STORAGE_EEPROM;
         EEPROM.begin(256);
     } else {
-        cfg_backend = STORAGE_SPIFFS;
+        cfg_backend = STORAGE_FS;
 //        if (SPIFFS.exists("/config.bin"))
 //          Serial.printf("Config is exists\n");
 //        else
@@ -115,7 +134,7 @@ void cfg_begin()
 
 bool cfg_spiffs()
 {
-    return cfg_backend == STORAGE_SPIFFS;
+    return cfg_backend == STORAGE_FS;
 }
 
 const char *cfg_get_backend()
@@ -123,7 +142,7 @@ const char *cfg_get_backend()
     if (cfg_backend == STORAGE_NVS)
     {
           return "NVS";
-    }else if (cfg_backend == STORAGE_SPIFFS)
+    }else if (cfg_backend == STORAGE_FS)
     {
           return "SPIFFS";
     }else if (cfg_backend == STORAGE_EEPROM)
@@ -167,7 +186,7 @@ bool cfg_check(const char *mqtt_cls, const hp_cfg_t *def_value)
         return checkPass;
     } else 
 #endif
-    if (cfg_backend == STORAGE_SPIFFS)
+    if (cfg_backend == STORAGE_FS)
     {
       if (strncmp(cfg_buffer, mqtt_cls, strlen(mqtt_cls)) != 0)
       {
@@ -201,7 +220,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
         }
         nvs_set_str(nvs, "class", mqtt_cls);
 #endif
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
         strcpy(cfg_buffer, mqtt_cls);
     } else {
@@ -223,7 +242,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
 #ifdef ESP_NVS_H
                     nvs_set_u8(nvs, def_value[i].nvs_name, def_value[i].data.uint8);
 #endif
-                } else if (cfg_backend == STORAGE_SPIFFS)
+                } else if (cfg_backend == STORAGE_FS)
                 {
                     *(uint8_t *)(cfg_buffer + def_value[i].offset) = def_value[i].data.uint8;
                 } else 
@@ -238,7 +257,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
 #ifdef ESP_NVS_H
                     nvs_set_u16(nvs, def_value[i].nvs_name, def_value[i].data.uint16);
 #endif
-                } else if (cfg_backend == STORAGE_SPIFFS)
+                } else if (cfg_backend == STORAGE_FS)
                 {
                     *(uint16_t *)(cfg_buffer + def_value[i].offset) = def_value[i].data.uint16;
                 } else 
@@ -253,7 +272,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
 #ifdef ESP_NVS_H
                     nvs_set_u32(nvs, def_value[i].nvs_name, def_value[i].data.uint32);
 #endif
-                } else if (cfg_backend == STORAGE_SPIFFS)
+                } else if (cfg_backend == STORAGE_FS)
                 {
                     *(uint32_t *)(cfg_buffer + def_value[i].offset) = def_value[i].data.uint32;
                 } else 
@@ -267,7 +286,7 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
 #ifdef ESP_NVS_H
                     nvs_set_str(nvs, def_value[i].nvs_name, "");
 #endif
-                } else if (cfg_backend == STORAGE_SPIFFS)
+                } else if (cfg_backend == STORAGE_FS)
                 {
                     *(uint8_t *)(cfg_buffer + def_value[i].offset) = 0;
                 } else 
@@ -293,16 +312,20 @@ void cfg_init(const char *mqtt_cls, const hp_cfg_t *def_value, bool full_init)
         nvs_commit(nvs);
         nvs_close(nvs);
 #endif
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
+#ifdef USE_LITTLE_FS
+        File f = LITTLEFS.open("/config.bin", "w");
+#else
         File f = SPIFFS.open("/config.bin", "w");
+#endif
 #ifdef ARDUINO_ARCH_ESP32
         f.write((uint8_t *)cfg_buffer, BUFFER_SIZE);
 #else
         f.write(cfg_buffer, BUFFER_SIZE);
 #endif
         f.close();
-        printLog(LOG_INFO, "Init save %s\n", SPIFFS.exists("/config.bin") ? "Success" : "Failed");
+//        printLog(LOG_INFO, "Init save %s\n", SPIFFS.exists("/config.bin") ? "Success" : "Failed");
     } else 
     {
         EEPROM.commit();
@@ -328,26 +351,6 @@ uint16_t boot_count_increase()
         return boot_count;
     }else 
 #endif
-    if (cfg_backend == STORAGE_SPIFFS)
-    {
-        File f = SPIFFS.open("/bootcount.txt", "r");
-        if (f)
-        {
-            f.read((uint8_t *)&boot_count, 2);
-            f.close();          
-        }
-        f = SPIFFS.open("/bootcount.txt", "w");
-        boot_count++;
-        f.write((uint8_t *)&boot_count, 2);
-        f.close();
-    } else if (cfg_backend == STORAGE_EEPROM)
-    {
-        uint8_t tmp_bootcount = 0;
-        EEPROM.get(255, tmp_bootcount);
-        EEPROM.put(255, tmp_bootcount++);
-        EEPROM.commit();
-        boot_count = tmp_bootcount;
-    }
     return boot_count;
 }
 
@@ -362,20 +365,8 @@ void boot_count_reset()
         nvs_erase_key(nvs, "bootcount");
         nvs_commit(nvs);
         nvs_close(nvs);
-    }else 
+    } 
 #endif
-    if (cfg_backend == STORAGE_SPIFFS)
-    {
-        File f = SPIFFS.open("/bootcount.txt", "w");
-        f.seek(0, SeekSet);
-        boot_count = 0;
-        f.write((uint8_t *)&boot_count, 2);
-        f.close();
-    } else if (cfg_backend == STORAGE_EEPROM)
-    {
-        EEPROM.put(255, 0);
-        EEPROM.commit();
-    }
 }
 
 uint8_t cfg_read_uint8(const hp_cfg_t *def_value, int index)
@@ -387,7 +378,7 @@ uint8_t cfg_read_uint8(const hp_cfg_t *def_value, int index)
         if (ESP_OK == nvs_get_u8(nvs, def_value[index].nvs_name, &val)) return val;
 #endif
         return def_value[index].data.uint8;
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
         return *(uint8_t *)(cfg_buffer + def_value[index].offset);
     }
@@ -405,7 +396,7 @@ uint16_t cfg_read_uint16(const hp_cfg_t *def_value, int index)
         if (ESP_OK == nvs_get_u16(nvs, def_value[index].nvs_name, &val)) return val;
 #endif
         return def_value[index].data.uint16;
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
         return *(uint16_t *)(cfg_buffer + def_value[index].offset);
     }
@@ -422,7 +413,7 @@ uint32_t cfg_read_uint32(const hp_cfg_t *def_value, int index)
         if (ESP_OK == nvs_get_u32(nvs, def_value[index].nvs_name, &val)) return val;
 #endif
         return def_value[index].data.uint32;
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
         return *(uint32_t *)(cfg_buffer + def_value[index].offset);
     }
@@ -466,7 +457,7 @@ int cfg_read_string(const hp_cfg_t *def_value, int index, char *buf, int bufsize
         
 #endif
         return -1;
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
         strncpy(buf, cfg_buffer + def_value[index].offset, bufsize);
         return strlen(cfg_buffer + def_value[index].offset);
@@ -503,7 +494,7 @@ int cfg_write_string(const hp_cfg_t *def_value, int index, char *buf, int bufsiz
         else 
 #endif
             return rc;
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
         if (bufsize == 0) return strlen(buf);
         strncpy(cfg_buffer + def_value[index].offset, buf, bufsize);
@@ -647,7 +638,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
                     nvs_set_u8(nvs, def_value[i].nvs_name, *(uint8_t *)def_value[i].assign);
 #endif
                     *(uint8_t *)(cfg_buffer + def_value[i].offset) = *(uint8_t *)def_value[i].assign;
-                }else if (cfg_backend == STORAGE_SPIFFS)
+                }else if (cfg_backend == STORAGE_FS)
                 {
                     *(uint8_t *)(cfg_buffer + def_value[i].offset) = *(uint8_t *)def_value[i].assign;
                 } else 
@@ -664,7 +655,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
                     nvs_set_u16(nvs, def_value[i].nvs_name, *(uint16_t *)def_value[i].assign);
 #endif
                     *(uint16_t *)(cfg_buffer + def_value[i].offset) = *(uint16_t *)def_value[i].assign;
-                }else if (cfg_backend == STORAGE_SPIFFS)
+                }else if (cfg_backend == STORAGE_FS)
                 {
                     *(uint16_t *)(cfg_buffer + def_value[i].offset) = *(uint16_t *)def_value[i].assign;
                 } else 
@@ -681,7 +672,7 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
                     nvs_set_u32(nvs, def_value[i].nvs_name, *(uint32_t *)def_value[i].assign);
 #endif
                     *(uint32_t *)(cfg_buffer + def_value[i].offset) = *(uint32_t *)def_value[i].assign;
-                }else if (cfg_backend == STORAGE_SPIFFS)
+                }else if (cfg_backend == STORAGE_FS)
                 {
                     *(uint32_t *)(cfg_buffer + def_value[i].offset) = *(uint32_t *)def_value[i].assign;
                 } else 
@@ -727,17 +718,26 @@ void cfg_save(const hp_cfg_t *def_value, bool ignoreString, bool forceSave)
         nvs_commit(nvs);
         nvs_close(nvs);
 #endif
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
+#ifdef USE_LITTLE_FS
+        File f = LITTLEFS.open("/config.bin.bak", "w");
+#else
         File f = SPIFFS.open("/config.bin.bak", "w");
+#endif
 #ifdef ARDUINO_ARCH_ESP32
         f.write((uint8_t *)cfg_buffer, BUFFER_SIZE);
 #else
         f.write(cfg_buffer, BUFFER_SIZE);
 #endif
         f.close();
+#ifdef USE_LITTLE_FS
+        LITTLEFS.remove("/config.bin");
+        LITTLEFS.rename("/config.bin.bak", "/config.bin");
+#else
         SPIFFS.remove("/config.bin");
         SPIFFS.rename("/config.bin.bak", "/config.bin");
+#endif        
     } else 
     {
         EEPROM.commit();
@@ -751,9 +751,12 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
   char chEEP;
 
   global_msg_buf = msg_buf;
+  last_def_cfg = def_value;
+  last_led_cb = led_cb;
+  
   if (strlen(ssid) == 0)
   {
-      WiFi.mode(WIFI_AP);
+      WiFi.mode(WIFI_AP_STA);
       
       uint32_t t_start = micros();
       while (micros() - t_start <= 100) yield();
@@ -791,9 +794,6 @@ void startupWifiConfigure(const hp_cfg_t *def_value, char *msg_buf, uint8_t msg_
       uint8_t primaryChan = 6;
       wifi_second_chan_t secondChan = WIFI_SECOND_CHAN_NONE;
       esp_wifi_set_channel(primaryChan, secondChan);
-
-      WiFiServer telnetServer(23);
-      WiFiClient telnetClient;
 
       telnetServer.begin(23);
 ssid_input:
@@ -928,7 +928,7 @@ ssid_input:
               } else if  (isPort) {
                   if (chEEP != '\n') {
                       port = port * 10 + chEEP - '0';
-                  }                  
+                  }
               } else {
                   *p++ = chEEP == '\n' || chEEP == '\r' ? '\0' : chEEP;
               }
@@ -988,6 +988,11 @@ ssid_input:
   WiFi.begin(ssid, password);
   udp.beginMulticast(IPAddress(224, 0, 0, 52), 12345);
   WiFi.setAutoReconnect(true);
+  
+#if defined(CFG_ENABLE_GLOBAL_WDT)
+    esp_task_wdt_init(30, true);
+    esp_task_wdt_add(NULL);
+#endif
 }
 
 void cfg_reset(const hp_cfg_t *def_value)
@@ -1010,9 +1015,13 @@ void cfg_reset(const hp_cfg_t *def_value)
         nvs_close(nvs);
 //        nvs_erase_all(nvs);
 #endif
-    } else if (cfg_backend == STORAGE_SPIFFS)
+    } else if (cfg_backend == STORAGE_FS)
     {
+      #ifdef USE_LITTLE_FS
+        LITTLEFS.remove("/config.bin");
+      #else
         SPIFFS.remove("/config.bin");
+      #endif
     } else 
     {
         for (int i = 0; i < BUFFER_SIZE; i++)
@@ -1050,14 +1059,22 @@ void sendBufferedLog(PubSubClient *client)
         int len;
         int fsize;
         bool sendFSLogFailed = false;
+        #ifdef USE_LITTLE_FS
+        File f = LITTLEFS.open("/logbuf.bin", "r");
+        #else
         File f = SPIFFS.open("/logbuf.bin", "r");
+        #endif
         fsize = f.size();
         while (f.position() < f.size())
         {
             if (!client->connected())
             {
                 printLog(LOG_ERROR, "LOG: send extfs archived log failed");
+                #ifdef USE_LITTLE_FS
+                File fcopy = LITTLEFS.open("/logbuf.bin.bak", "w");
+                #else
                 File fcopy = SPIFFS.open("/logbuf.bin.bak", "w");
+                #endif
                 while (f.position() < f.size())
                 {
                     len = f.read((uint8_t *)buf, sizeof(buf));
@@ -1066,8 +1083,13 @@ void sendBufferedLog(PubSubClient *client)
                 }
                 fcopy.close();
                 f.close();
+                #ifdef USE_LITTLE_FS
+                LITTLEFS.remove("/logbuf.bin");
+                LITTLEFS.rename("/logbuf.bin.bak", "/logbuf.bin");
+                #else
                 SPIFFS.remove("/logbuf.bin");
                 SPIFFS.rename("/logbuf.bin.bak", "/logbuf.bin");
+                #endif
                 sendFSLogFailed = true;
                 break;
             }
@@ -1083,7 +1105,11 @@ void sendBufferedLog(PubSubClient *client)
         if (!sendFSLogFailed)
         {
             f.close();
-            SPIFFS.remove("/logbuf.bin");
+            #ifdef USE_LITTLE_FS
+              LITTLEFS.remove("/logbuf.bin");
+            #else
+              SPIFFS.remove("/logbuf.bin");
+            #endif
             extFsLogExists = false;
         }
             
@@ -1112,6 +1138,105 @@ void sendBufferedLog(PubSubClient *client)
 #endif
 }
 
+
+typedef enum
+{
+    SSID,
+    PASSWORD,
+    MQTT_SERVER,
+    MQTT_PORT,
+    CONFIRM
+} hp_input_stage_t;
+
+void processInput(char chEEP)
+{
+    static hp_input_stage_t inputStage = SSID;
+    static char *p = ssid;
+    static char *pOffset = ssid;
+
+    if (chEEP == 0)
+    {
+        inputStage = SSID;
+        p = ssid;
+        pOffset = ssid;
+        telnetClient.printf("\nPlease input SSID: ");
+        return;
+    }
+    if (chEEP == '\b')
+    {
+        *p--;
+        if (p < pOffset) p = pOffset;
+    } else if (chEEP == '\r')
+    {
+        
+    } else if (inputStage == SSID)
+    {
+        *p++ = chEEP == '\n' ? '\0' : chEEP;
+        if (chEEP == '\n')
+        {
+            if (p == pOffset + 1)
+            {
+                p--;
+                return;
+            }
+            inputStage = PASSWORD;
+            telnetClient.printf("Please input Password: ");
+            p = password;
+            pOffset = p;
+        }
+    } else if (inputStage == PASSWORD)
+    {
+        *p++ = chEEP == '\n' ? '\0' : chEEP;
+        if (chEEP == '\n')
+        {
+            inputStage = MQTT_SERVER;
+            telnetClient.printf("Please input MQTT Server: ");
+            p = mqtt_server;
+            pOffset = p;
+        }
+    } else if (inputStage == MQTT_SERVER)
+    {
+        *p++ = chEEP == '\n' || chEEP == ':' ? '\0' : chEEP;
+        if (chEEP == ':')
+        {
+            inputStage = MQTT_PORT;
+            port = 0;
+        } else if (chEEP == '\n')
+        {
+            inputStage = CONFIRM;
+            telnetClient.printf("Input SSID = %s  PASSWORD = %s  MQTT Server: %s:%d\n", ssid, password, mqtt_server, port);
+            telnetClient.print("Confirm? [y/n]");
+        }
+    } else if (inputStage == MQTT_PORT)
+    {
+        if (chEEP != '\n') {
+            port = port * 10 + chEEP - '0';
+        } else 
+        {
+            inputStage = CONFIRM;
+            telnetClient.printf("Input SSID = %s  PASSWORD = %s  MQTT Server: %s:%d\n", ssid, password, mqtt_server, port);
+            telnetClient.print("Confirm? [y/n]");
+        }
+    } else if (inputStage == CONFIRM)
+    {
+        if (chEEP == 'y')
+        {
+            Serial.printf("\n");
+            cfg_save(last_def_cfg);
+            if (telnetClient)
+            {
+                telnetClient.stop();
+            }
+            rebootSystem();
+        } else if (chEEP != 'n')
+        {
+            telnetClient.print("Confirm? [y/n]");
+        } else 
+        {
+            processInput(0);
+        }
+    }
+}
 
 bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)) { //等待，直到连接上服务器
   static uint32_t disconnectTime = 0;
@@ -1170,14 +1295,11 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
           return false;
       }
   }
+  boolean mqttRequestFallback = false;
   if (wifiStatus != WL_CONNECTED && millis() - lastWiFiDebugMessage >= 250)
   {
       Serial.printf(".");
       lastWiFiDebugMessage = millis();
-  }
-  if (wifiStatus != WL_CONNECTED && millis() - disconnectTime >= 30000) {
-      printLog(LOG_FATAL, "\nWiFi: Status = %d (Disconnected), RESET SYSTEM\n", wifiStatus);
-      rebootSystem();
   }
   if (wifiStatus == WL_CONNECTED && !client->connected() && millis() - last_try_connect_mqtt >= 3000){
       printLog(LOG_INFO, "MQTT: Connecting to %s:%d, state: %d\n", mqtt_server, port, client->state());
@@ -1199,15 +1321,69 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
         esp_task_wdt_reset();
   #endif
         retry_failed_count++;
-        printLog(LOG_ERROR, "MQTT: Connect failed, rc=%d\n", client->state());//连接失败
+        int fail_reason = client->state();
+        printLog(LOG_ERROR, "MQTT: Connect failed, rc=%d\n", fail_reason);//连接失败
         client->disconnect();
         last_try_connect_mqtt = millis();
-//        delay(1000);
-//        if (retry_failed_count >= 10)
-//        {
-//            printLog(LOG_FATAL, "MQTT: Reconnect Too many times, RESET SYSTEM\n");
-//            rebootSystem();
-//        }
+        if (retry_failed_count >= 10 && fail_reason != MQTT_CONNECT_FAILED)
+        {
+            printLog(LOG_FATAL, "MQTT: Reconnect Too many times, RESET WiFi\n");
+            WiFi.disconnect();
+            retry_failed_count = 0;
+        } else if (retry_failed_count >= 10) {
+            mqttRequestFallback = true;
+            printLog(LOG_FATAL, "MQTT: Server connect denied, startup fallback wifi\n");
+        }
+      }
+  }
+  if (mqttRequestFallback || (wifiStatus != WL_CONNECTED && millis() - disconnectTime >= 60000)) {
+      if (!fallbackEnabled)
+      {
+          fallbackEnabled = true;
+
+          WiFi.disconnect();
+          
+          WiFi.mode(WIFI_AP_STA);
+          
+          printLog(LOG_INFO, "Startup WiFi Station -> %s...\n", mqtt_cls);
+          while(!WiFi.softAP(mqtt_cls)){ delay(10); yield(); }; // Startup AP
+          printLog(LOG_INFO, "Startup Telet Server...\n");
+
+          if (strlen(ssid) > 0)
+          {
+              WiFi.begin(ssid, password);
+          }          
+          
+          uint8_t primaryChan = 6;
+          wifi_second_chan_t secondChan = WIFI_SECOND_CHAN_NONE;
+          esp_wifi_set_channel(primaryChan, secondChan);
+    
+          telnetServer.begin(23);
+          printLog(LOG_FATAL, "\nWiFi: Status = %d (Disconnected), Startup Fallback WiFi\n", wifiStatus);
+      }
+//      rebootSystem();
+  }
+  if (fallbackEnabled)
+  {
+      char chEEP;
+      if (!telnetClient && (telnetClient = telnetServer.available())) {
+          uint32_t t_start = micros();
+          while (micros() - t_start <= 100) yield();
+          while (telnetClient.available()) telnetClient.read();
+          
+          telnetClient.printf("Welcome, Device ID: %s\n", mqtt_cls);
+          processInput(0);
+      }
+      if (telnetClient)
+      {
+          if (telnetClient.connected() && telnetClient.available())
+          {
+              chEEP = telnetClient.read();              
+          }
+          if (chEEP != 0)
+          {
+              processInput(chEEP);
+          }
       }
   }
   if (client->connected())
@@ -1285,27 +1461,46 @@ void cfg_initalize_info(size_t size_conf)
   esp_task_wdt_add(NULL);
   
   extFsLogExists = false;
-  if (SPIFFS.begin(true))
+#ifdef USE_LITTLE_FS
+  if (!LITTLEFS.begin())
   {
-      Serial.printf("SPIFFS exists: used: %ld / total: %ld\n", SPIFFS.usedBytes(), SPIFFS.totalBytes());
+      Serial.printf("Initalize LITTLEFS failed, try to format\n");
+      LITTLEFS.format();
+  }
+  if (LITTLEFS.begin())
+  {
+      if (LITTLEFS.totalBytes() / 2 > LITTLEFS.usedBytes())
+      {
+          max_log_buffer = LITTLEFS.totalBytes() / 2 - LITTLEFS.usedBytes();
+      }
+      extFsLogExists = LITTLEFS.exists("/logbuf.bin");
+      Serial.printf("LITTLEFS exists: used: %ld / total: %ld LOG: %d\n", LITTLEFS.usedBytes(), LITTLEFS.totalBytes(), extFsLogExists);
+  } else 
+  {
+      Serial.printf("Initalize LITTLEFS failed\n");
+  }
+#else
+  if (SPIFFS.begin(false))
+  {
       if (SPIFFS.totalBytes() / 2 > SPIFFS.usedBytes())
       {
           max_log_buffer = SPIFFS.totalBytes() / 2 - SPIFFS.usedBytes();
-          extFsLogExists = SPIFFS.exists("/logbuf.bin");
       }
+      extFsLogExists = SPIFFS.exists("/logbuf.bin");
+      Serial.printf("SPIFFS exists: used: %ld / total: %ld LOG: %d\n", SPIFFS.usedBytes(), SPIFFS.totalBytes(), extFsLogExists);
   } else 
   {
       Serial.printf("Initalize SPIFFFS failed\n");
   }
+#endif
   printLog(LOG_INFO, "Reset Reason: %d / %d\n", rtc_get_reset_reason(0), rtc_get_reset_reason(1));
 
+  // Hook System Log to our log handler
+  esp_log_set_vprintf(&esp_system_log);
+  
   esp_task_wdt_delete(NULL);
   esp_task_wdt_deinit();
   
-#if defined(CFG_ENABLE_GLOBAL_WDT)
-  esp_task_wdt_init(30, true);
-  esp_task_wdt_add(NULL);
-#endif
 //  esp_bluedroid_init();
 //  esp_bluedroid_enable();
 //  const uint8_t *BT_macAddress = esp_bt_dev_get_address();
@@ -1324,7 +1519,11 @@ void rebootSystem()
         log_chain_t *p = log_chain;
         if (p != NULL)
         {
-            File LogBufferFile = SPIFFS.open("/logbuf.bin", "a+");
+            #ifdef USE_LITTLE_FS
+                File LogBufferFile = LITTLEFS.open("/logbuf.bin", "a+");
+            #else
+                File LogBufferFile = SPIFFS.open("/logbuf.bin", "a+");
+            #endif
             while (p != NULL)
             {
                 if (max_log_buffer < p->len + 1)
@@ -1350,6 +1549,25 @@ void rebootSystem()
 }
 
 
+// MAGIC DEFINE FOR ESP-Toolkit >= 2.0
+#ifdef ARDUINO_USB_CDC_ON_BOOT
+void update_started() {
+  Serial.println("CALLBACK:  HTTP update process started");
+}
+
+void update_finished() {
+  Serial.println("CALLBACK:  HTTP update process finished");
+}
+
+void update_progress(int cur, int total) {
+  Serial.printf("CALLBACK:  HTTP update process at %d of %d bytes...\n", cur, total);
+}
+
+void update_error(int err) {
+  Serial.printf("CALLBACK:  HTTP update fatal error code %d\n", err);
+}
+#endif
+
 void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用于接收数据
   int l=0;
   int p=1;
@@ -1361,6 +1579,14 @@ void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用�
 #if defined(ARDUINO_ARCH_ESP32) && defined(CFG_ENABLE_GLOBAL_WDT)
     esp_task_wdt_delete(NULL);
     esp_task_wdt_deinit();
+#endif
+
+#if defined(ARDUINO_ARCH_ESP32) && defined(ARDUINO_USB_CDC_ON_BOOT)
+    httpUpdate.onStart(update_started);
+    httpUpdate.onEnd(update_finished);
+    httpUpdate.onProgress(update_progress);
+    httpUpdate.onError(update_error);
+//    printLog(LOG_INFO, "Current Sketch: %s\n", getSketchSHA256().c_str());
 #endif
     
     char bufferByte = payload[length];
@@ -1389,6 +1615,10 @@ void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用�
         sprintf(global_msg_buf, "{\"ota\":\"success\"}");
         global_client->publish("status", global_msg_buf);
         printLog(LOG_INFO, "HTTP_UPDATE_OK");
+        rebootSystem();
+        break;
+      default:
+        printLog(LOG_INFO, "OTA Status Unknow: %d\n", ret);
         rebootSystem();
         break;
     }
@@ -1424,22 +1654,18 @@ void init_mqtt_client(PubSubClient *client, mqtt_callback callback, cfg_callback
     client->setCallback(cfg_mqtt_callback);
 }
 
-
-void printLog(int debugLevel, char *fmt, ...)
+int vprintLog(int debugLevel, const char *fmt, va_list arglist)
 {
-    va_list arglist;
-    /* Initializing arguments to store all values after num */
-    va_start ( arglist, fmt );
-    size_t needed = vsnprintf(NULL, 0, fmt, arglist);
-    char *buffer = (char *)malloc(needed+1+13);  // 2KB Buffer
-    if (buffer == NULL) return;
+    size_t needed = vsnprintf(NULL, 0, fmt, arglist)+1+14;
+    char *buffer = (char *)malloc(needed);  // 2KB Buffer
+    if (buffer == NULL) {
+        Serial.printf("Log: Allocate buffer failed.\n");
+        return 0;
+    }
     char *p = buffer + sprintf(buffer, "%ld|%d|", millis(), debugLevel);
     // buffer
     vsprintf( p, fmt, arglist );
-    Serial.printf("%s", p);
-    va_end ( arglist );                  // Cleans up the list
-
-    needed += p - buffer;
+    Serial.write(p);
     
 #ifdef ARDUINO_ARCH_ESP32
     if (log_chain_buffer + needed <= 4096)   // Max 4K Log Buffer
@@ -1449,7 +1675,7 @@ void printLog(int debugLevel, char *fmt, ...)
         {
             free(buffer);
             Serial.printf("Log: Buffer Overflowed\n");
-            return;
+            return needed - 1 - 14;
         }
         node->data = buffer;
         node->len = needed;
@@ -1459,7 +1685,7 @@ void printLog(int debugLevel, char *fmt, ...)
         {
             log_chain = node;
             log_chain_tail = node;
-        }else {
+        } else {
             log_chain_tail->next = node;
             log_chain_tail = node;
         }
@@ -1471,6 +1697,21 @@ void printLog(int debugLevel, char *fmt, ...)
 #else
     free(buffer);
 #endif
+  return needed - 1 - 14;
+}
+
+void printLog(int debugLevel, const char *fmt, ...)
+{
+    va_list arglist;
+    /* Initializing arguments to store all values after num */
+    va_start ( arglist, fmt );
+    vprintLog(debugLevel, fmt, arglist);
+    va_end ( arglist );                  // Cleans up the list
+}
+
+int esp_system_log(const char *fmt, va_list arg)
+{
+    return vprintLog(LOG_INFO, fmt, arg);
 }
 
 int uint16_cmpfunc (const void * a, const void * b) {
