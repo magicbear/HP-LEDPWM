@@ -1802,6 +1802,7 @@ void loop() {
        {
           if (!isScrMode)
               Serial.printf("PING %ld  WiFI: %d RSSI: %d\n", currentMillis, WiFi.status(), WiFi.RSSI());
+          last_send_meta = currentMillis;
        }
     }
     onLedCallback(SERVER_CONNECTED);
