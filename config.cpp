@@ -1,7 +1,7 @@
 #include <EEPROM.h>
 #define USE_LITTLE_FS
 #ifdef USE_LITTLE_FS
-#include <LITTLEFS.h>
+#include <LittleFS.h>
 #else
   #ifdef ARDUINO_ARCH_ESP32
     #include <SPIFFS.h>
@@ -116,10 +116,6 @@ void cfg_begin()
         EEPROM.begin(256);
     } else {
         cfg_backend = STORAGE_FS;
-//        if (SPIFFS.exists("/config.bin"))
-//          Serial.printf("Config is exists\n");
-//        else
-//          Serial.printf("Config is not exists\n");
         File f = SPIFFS.open("/config.bin", "r");
         int r;
         if ((r = f.read((uint8_t *)cfg_buffer, BUFFER_SIZE)) != BUFFER_SIZE)
@@ -149,6 +145,7 @@ const char *cfg_get_backend()
     {
           return "EEPROM";
     }
+    return NULL;
 }
 
 enum cfg_storage_backend_t cfg_get_backend_t()
@@ -1240,6 +1237,7 @@ void processInput(char chEEP)
 
 bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)) { //等待，直到连接上服务器
   static uint32_t disconnectTime = 0;
+  static uint32_t offlineTime = 0xffffffff;
   static wl_status_t lastWiFiStatus = WL_NO_SHIELD;
   static int retry_failed_count = 0;
   static uint32_t last_try_connect_mqtt = 0;
@@ -1268,7 +1266,7 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
       } else if (wifiStatus == WL_NO_SHIELD)
       {
           disconnectTime = millis();
-          Serial.printf("\nWiFi: %s, waiting", szWlStatusToStr(wifiStatus));
+          printLog(LOG_DEBUG, "\nWiFi: %s, waiting", szWlStatusToStr(wifiStatus));
       } else if (wifiStatus == WL_DISCONNECTED || wifiStatus == WL_NO_SSID_AVAIL) {
           disconnectTime = millis();
           WiFi.reconnect();
@@ -1280,15 +1278,13 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
           disconnectTime = 0;
           IPAddress myAddress = WiFi.localIP();
           printLog(LOG_INFO, "\nWiFi: Connected, IP: %s\n", myAddress.toString().c_str());
-//          Serial.print(myAddress);
-//          Serial.printf("\n");
       }
       lastWiFiStatus = wifiStatus;
   }
   if (wifiStatus == WL_NO_SHIELD && millis() - disconnectTime >= 2000)
   {
       disconnectTime = millis();
-      Serial.printf("\nWiFi: %s, reset wifi", szWlStatusToStr(wifiStatus));
+      printLog(LOG_DEBUG, "\nWiFi: %s, reset wifi", szWlStatusToStr(wifiStatus));
       if(!WiFi.enableSTA(true)) {
           printLog(LOG_FATAL, "WiFi: STA enable failed! Force reset system!!\n");
           rebootSystem();
@@ -1298,7 +1294,9 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
   boolean mqttRequestFallback = false;
   if (wifiStatus != WL_CONNECTED && millis() - lastWiFiDebugMessage >= 250)
   {
+#if !defined(CORE_DEBUG_LEVEL) || CORE_DEBUG_LEVEL >= 4 // VERBOSE
       Serial.printf(".");
+#endif
       lastWiFiDebugMessage = millis();
   }
   if (wifiStatus == WL_CONNECTED && !client->connected() && millis() - last_try_connect_mqtt >= 3000){
@@ -1314,6 +1312,12 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
         esp_task_wdt_delete(NULL);
         esp_task_wdt_deinit();
   #endif
+        if (fallbackEnabled)
+        {
+            fallbackEnabled = false;
+            printLog(LOG_INFO, "Fallback: Connected to WiFi success, close fallback WiFi.\n");
+            WiFi.mode(WIFI_STA);
+        }
         last_try_connect_mqtt = 0;
         if (onConnect != NULL) onConnect();
       } else {
@@ -1325,15 +1329,16 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
         printLog(LOG_ERROR, "MQTT: Connect failed, rc=%d\n", fail_reason);//连接失败
         client->disconnect();
         last_try_connect_mqtt = millis();
-        if (retry_failed_count >= 10 && fail_reason != MQTT_CONNECT_FAILED)
+        if (retry_failed_count >= 10) // && fail_reason != MQTT_CONNECT_FAILED)
         {
             printLog(LOG_FATAL, "MQTT: Reconnect Too many times, RESET WiFi\n");
             WiFi.disconnect();
             retry_failed_count = 0;
-        } else if (retry_failed_count >= 10) {
-            mqttRequestFallback = true;
-            printLog(LOG_FATAL, "MQTT: Server connect denied, startup fallback wifi\n");
         }
+//        else if (retry_failed_count >= 10) {
+//            mqttRequestFallback = true;
+//            printLog(LOG_FATAL, "MQTT: Server connect denied, startup fallback wifi\n");
+//        }
       }
   }
   if (mqttRequestFallback || (wifiStatus != WL_CONNECTED && millis() - disconnectTime >= 60000)) {
@@ -1345,6 +1350,10 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
           
           WiFi.mode(WIFI_AP_STA);
           
+          uint8_t primaryChan = 6;
+          wifi_second_chan_t secondChan = WIFI_SECOND_CHAN_NONE;
+          esp_wifi_set_channel(primaryChan, secondChan);
+          
           printLog(LOG_INFO, "Startup WiFi Station -> %s...\n", mqtt_cls);
           while(!WiFi.softAP(mqtt_cls)){ delay(10); yield(); }; // Startup AP
           printLog(LOG_INFO, "Startup Telet Server...\n");
@@ -1354,10 +1363,6 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
               WiFi.begin(ssid, password);
           }          
           
-          uint8_t primaryChan = 6;
-          wifi_second_chan_t secondChan = WIFI_SECOND_CHAN_NONE;
-          esp_wifi_set_channel(primaryChan, secondChan);
-    
           telnetServer.begin(23);
           printLog(LOG_FATAL, "\nWiFi: Status = %d (Disconnected), Startup Fallback WiFi\n", wifiStatus);
       }
@@ -1445,6 +1450,17 @@ bool check_connect(char *mqtt_cls, PubSubClient *client, void (*onConnect)(void)
           }
       }
   }
+  if (wifiStatus == WL_CONNECTED) {
+      offlineTime = 0;
+  } else if (offlineTime == 0)
+  {
+      offlineTime = time(NULL);
+  } else if (fallbackEnabled && time(NULL) - offlineTime >= 900 && !telnetClient)
+  {
+      // Over 15 Minutes cannot conect to WiFi
+      printLog(LOG_ERROR, "Failed to connect WiFi and no fallback request, reboot\n");
+      rebootSystem();
+  }
   return wifiStatus == WL_CONNECTED && client->connected();
 }
 
@@ -1454,7 +1470,9 @@ void cfg_initalize_info(size_t size_conf)
 #ifdef ARDUINO_ARCH_ESP8266
   rst_info *resetInfo;
   resetInfo = ESP.getResetInfoPtr();
+#if !defined(CORE_DEBUG_LEVEL) || CORE_DEBUG_LEVEL >= 3 // INFO
   Serial.printf("Flash: %d\n", ESP.getFlashChipRealSize());
+#endif
   printLog(LOG_INFO, "Reset Reason: %d -> %s\n", resetInfo->reason, ESP.getResetReason().c_str());
 #elif ARDUINO_ARCH_ESP32
   esp_task_wdt_init(10, true);
@@ -1464,7 +1482,7 @@ void cfg_initalize_info(size_t size_conf)
 #ifdef USE_LITTLE_FS
   if (!LITTLEFS.begin())
   {
-      Serial.printf("Initalize LITTLEFS failed, try to format\n");
+      printLog(LOG_INFO, "Initalize LITTLEFS failed, try to format\n");
       LITTLEFS.format();
   }
   if (LITTLEFS.begin())
@@ -1474,10 +1492,10 @@ void cfg_initalize_info(size_t size_conf)
           max_log_buffer = LITTLEFS.totalBytes() / 2 - LITTLEFS.usedBytes();
       }
       extFsLogExists = LITTLEFS.exists("/logbuf.bin");
-      Serial.printf("LITTLEFS exists: used: %ld / total: %ld LOG: %d\n", LITTLEFS.usedBytes(), LITTLEFS.totalBytes(), extFsLogExists);
+      printLog(LOG_INFO, "LITTLEFS exists: used: %ld / total: %ld LOG: %d\n", LITTLEFS.usedBytes(), LITTLEFS.totalBytes(), extFsLogExists);
   } else 
   {
-      Serial.printf("Initalize LITTLEFS failed\n");
+      printLog(LOG_ERROR, "Initalize LITTLEFS failed\n");
   }
 #else
   if (SPIFFS.begin(false))
@@ -1487,10 +1505,10 @@ void cfg_initalize_info(size_t size_conf)
           max_log_buffer = SPIFFS.totalBytes() / 2 - SPIFFS.usedBytes();
       }
       extFsLogExists = SPIFFS.exists("/logbuf.bin");
-      Serial.printf("SPIFFS exists: used: %ld / total: %ld LOG: %d\n", SPIFFS.usedBytes(), SPIFFS.totalBytes(), extFsLogExists);
+      printLog(LOG_INFO, "SPIFFS exists: used: %ld / total: %ld LOG: %d\n", SPIFFS.usedBytes(), SPIFFS.totalBytes(), extFsLogExists);
   } else 
   {
-      Serial.printf("Initalize SPIFFFS failed\n");
+      printLog(LOG_ERROR, "Initalize SPIFFFS failed\n");
   }
 #endif
   printLog(LOG_INFO, "Reset Reason: %d / %d\n", rtc_get_reset_reason(0), rtc_get_reset_reason(1));
@@ -1505,7 +1523,11 @@ void cfg_initalize_info(size_t size_conf)
 //  esp_bluedroid_enable();
 //  const uint8_t *BT_macAddress = esp_bt_dev_get_address();
 //  Serial.printf("BLE Address: %02x:%02x:%02x:%02x:%02x:%02x", BT_macAddress);
+
+#if !defined(CORE_DEBUG_LEVEL) || CORE_DEBUG_LEVEL >= 3 // INFO
   Serial.printf("CPU Speed: %d MHz  XTAL: %d MHz  APB: %d Hz\n", getCpuFrequencyMhz(), getXtalFrequencyMhz(), getApbFrequency());
+#endif
+
 #endif
     printLog(LOG_INFO, "Build Date: %s %s  Board: %s  CFG FROM %s SIZE: %d\n", __DATE__, __TIME__, ARDUINO_BOARD, cfg_get_backend(), size_conf);
 //    Serial.printf("WiFi: AutoConnect: %d  AutoReconnect: %d\n", WiFi.getAutoConnect(), WiFi.getAutoReconnect());
@@ -1537,7 +1559,6 @@ void rebootSystem()
                 p = p->next;
             }
             LogBufferFile.close();
-            Serial.printf("Savedd logs to ExtFS\n");
         }
     }
     ESP.restart();
@@ -1598,22 +1619,16 @@ void cfg_mqtt_callback(char* topic, byte* payload, unsigned int length) {//用�
 
     switch (ret) {
       case HTTP_UPDATE_FAILED:
-        sprintf(global_msg_buf, "{\"ota\":\"%s\"}", ESPhttpUpdate.getLastErrorString().c_str());
-        global_client->publish("status", global_msg_buf);
         printLog(LOG_FATAL, "HTTP_UPDATE_FAILD Error (%d): %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
         rebootSystem();
         break;
 
       case HTTP_UPDATE_NO_UPDATES:
-        sprintf(global_msg_buf, "{\"ota\":\"no updates\"}");
-        global_client->publish("status", global_msg_buf);
         printLog(LOG_ERROR, "HTTP_UPDATE_NO_UPDATES");
         rebootSystem();
         break;
 
       case HTTP_UPDATE_OK:
-        sprintf(global_msg_buf, "{\"ota\":\"success\"}");
-        global_client->publish("status", global_msg_buf);
         printLog(LOG_INFO, "HTTP_UPDATE_OK");
         rebootSystem();
         break;
@@ -1659,13 +1674,20 @@ int vprintLog(int debugLevel, const char *fmt, va_list arglist)
     size_t needed = vsnprintf(NULL, 0, fmt, arglist)+1+14;
     char *buffer = (char *)malloc(needed);  // 2KB Buffer
     if (buffer == NULL) {
+#if !defined(CORE_DEBUG_LEVEL) || CORE_DEBUG_LEVEL >= 1 // ERROR
         Serial.printf("Log: Allocate buffer failed.\n");
+#endif
         return 0;
     }
     char *p = buffer + sprintf(buffer, "%ld|%d|", millis(), debugLevel);
     // buffer
     vsprintf( p, fmt, arglist );
+#if defined(CORE_DEBUG_LEVEL) && CORE_DEBUG_LEVEL > 0
+    if (CORE_DEBUG_LEVEL >= debugLevel)
+        Serial.write(p);
+#elif !defined(CORE_DEBUG_LEVEL)
     Serial.write(p);
+#endif
     
 #ifdef ARDUINO_ARCH_ESP32
     if (log_chain_buffer + needed <= 4096)   // Max 4K Log Buffer
@@ -1674,7 +1696,9 @@ int vprintLog(int debugLevel, const char *fmt, va_list arglist)
         if (node == NULL)
         {
             free(buffer);
+#if !defined(CORE_DEBUG_LEVEL) || CORE_DEBUG_LEVEL >= 2 // Warning
             Serial.printf("Log: Buffer Overflowed\n");
+#endif
             return needed - 1 - 14;
         }
         node->data = buffer;
@@ -1692,7 +1716,9 @@ int vprintLog(int debugLevel, const char *fmt, va_list arglist)
         log_chain_buffer += needed;
     } else {
         free(buffer);
+#if !defined(CORE_DEBUG_LEVEL) || CORE_DEBUG_LEVEL >= 2 // Warning
         Serial.printf("Log: Buffer Full\n");
+#endif
     }
 #else
     free(buffer);

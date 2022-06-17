@@ -54,8 +54,8 @@ volatile scr_timing_t executeTiming, pendingTiming;
 #define DEBUG_LEVEL 2
 
 #ifdef ARDUINO_ARCH_ESP32
-  #define LED0_PIN 23
-  #define LED1_PIN 22
+  #define LED0_PIN 22
+  #define LED1_PIN 23
   //#define DEBUG_TRIGGER_PIN 33
   //#define DEBUG_SAVE_PIN 33
   #define DEBUG_TIMER_PIN 33
@@ -63,7 +63,7 @@ volatile scr_timing_t executeTiming, pendingTiming;
 
 #ifndef MQTT_CLASS
 #define MQTT_CLASS "HP-LEDPWM"
-#define VERSION "2.83"
+#define VERSION "2.87"
 
 #ifdef ARDUINO_ARCH_ESP8266
   #define PWM_CHANNELS 2
@@ -1073,6 +1073,19 @@ void setup() {
           config.pin_sensor = 32;
           config.pwm_end = 195;
           CFG_SAVE();
+      } else if (isBoardResMatch(4700, 20000, pin35Voltage))
+      {
+          // 0-10V Version
+          printLog(LOG_INFO, "Auto Initalize by PCB Board - Version 2.x\n");
+          config.work_mode = 0;
+          config.pin_ch1 = 101;
+          config.pin_ch2 = 0;
+          config.pin_en1 = 0;
+          config.pwm_src = 4;
+          config.pwm_src_duty = 50;
+          config.pin_sensor = 32;
+          config.pwm_end = 195;
+          CFG_SAVE();
       } else if (digitalRead(34) == HIGH)
       {
           printLog(LOG_INFO, "Auto Initalize by PCB Board - Dual CH\n");
@@ -1112,18 +1125,6 @@ void setup() {
   int iOffset;
   int rc;
   
-  analogPinInit(config.pwm_freq, config.pwm_period, config.pin_ch1);
-  if (config.pin_ch2 != 0)
-  {
-      analogPinInit(config.pwm_freq, config.pwm_period, config.pin_ch2);
-  }
-  if (config.pwm_src != 0)
-  {
-      analogPinInit(config.pwm_freq, config.pwm_period, config.pwm_src);
-  }
-  ignoreOutput = true;
-  updatePWMValue(0, config.mode_ch2 == 0 ? config.ct_abx : 0);
-
 #if ARDUINO_ARCH_ESP32
   if (config.pwm_freq <= 40000 && (config.work_mode == 0 || config.work_mode == 1))
   {
@@ -1144,6 +1145,18 @@ void setup() {
       }
   }
 #endif
+
+  analogPinInit(config.pwm_freq, config.pwm_period, config.pin_ch1);
+  if (config.pin_ch2 != 0)
+  {
+      analogPinInit(config.pwm_freq, config.pwm_period, config.pin_ch2);
+  }
+  if (config.pwm_src != 0)
+  {
+      analogPinInit(config.pwm_freq, config.pwm_period, config.pwm_src);
+  }
+  ignoreOutput = true;
+  updatePWMValue(0, config.mode_ch2 == 0 ? config.ct_abx : 0);
 
 //  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
 
@@ -1167,7 +1180,7 @@ void setup() {
 #ifdef LED0_PIN
   pinMode(LED0_PIN, OUTPUT);
   digitalWrite(LED0_PIN, HIGH);
-  ledcSetup(3, 1000, 8);
+  ledcSetup(3, config.pwm_freq, 8);
   ledcWrite(3, 255);
   ledcAttachPin(LED0_PIN, 3);
 #endif

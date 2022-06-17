@@ -72,7 +72,7 @@ typedef struct hp_cfg {
     } data;    /*!< default value */
     void *assign;    /*!< pointer to data */
     bool full_init;    /*!< init when cfg_init with full_init = false */
-    const char *nvs_name;    /*!< NVS storage engine key name */
+    const char nvs_name[16];    /*!< NVS storage engine key name */
 } hp_cfg_t;
 
 /**@{*/
